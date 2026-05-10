@@ -13,6 +13,8 @@ Slash commands during play:
     /journal     show recent journal entries
     /quests      show quest log
     /map         show discovered locations
+    /companions  show pets/animals/hirelings and their stats
+    /ask <q>     ask the DM an OOC question (e.g. /ask can I get a pet?)
     /save        save now (also auto-saves every turn)
     /quit        save and exit
 """
@@ -28,7 +30,7 @@ import art
 import character as char_mod
 import ui
 from dm import DungeonMaster
-from state import GameState
+from state import GameState, friendliness_tier
 from world import CAMPAIGN_OPENING, CAMPAIGN_TITLE
 
 
@@ -39,13 +41,15 @@ HELP_TEXT = """\
   /journal     show recent journal entries
   /quests      show quest log
   /map         show discovered locations
+  /companions  show pets/animals/hirelings and their stats
   /recap       reprint the most recent DM narration
+  /ask <q>     ask the DM an out-of-character question (no time passes)
   /save        save now (also auto-saves every turn)
   /quit        save and exit
 
-Anything else is sent to the Dungeon Master. Be specific. The DM
-voices the world; you voice your character. You can speak in
-quotes, describe actions, ask questions, etc.
+Anything else is sent to the Dungeon Master as an in-character action.
+Use /ask for meta questions like "can I get a pet?" or "what's nearby?"
+-- the DM will guide you without advancing the scene.
 """
 
 
@@ -128,6 +132,39 @@ def _print_map(state: GameState) -> None:
     ui.boxed("World Map", lines)
 
 
+def _print_companions(state: GameState) -> None:
+    if not state.companions:
+        ui.boxed("Companions", ["(none -- you travel alone)"])
+        return
+    in_party = [c for c in state.companions if c.get("in_party", True)]
+    away = [c for c in state.companions if not c.get("in_party", True)]
+    lines: list[str] = []
+    if in_party:
+        lines.append("WITH YOU")
+        for c in in_party:
+            f_score = int(c.get("friendliness", 50))
+            tier = friendliness_tier(f_score)
+            atk = c.get("attack_bonus")
+            atk_s = f"+{atk}" if isinstance(atk, int) else "-"
+            dmg = c.get("damage_dice") or "-"
+            lines.append(f"  • {c['name']} ({c.get('kind', '?')})")
+            lines.append(f"      HP {c.get('hp', 0)}/{c.get('max_hp', 0)}   AC {c.get('ac', '?')}   atk {atk_s}   dmg {dmg}")
+            lines.append(f"      friendliness {f_score}/100 ({tier})")
+            inv = c.get("inventory") or []
+            if inv:
+                bits = [f"{it['name']}" + (f" x{it['quantity']}" if it.get("quantity", 1) > 1 else "") for it in inv]
+                lines.append(f"      carries: {', '.join(bits)}")
+            if c.get("notes"):
+                lines.append(f"      notes: {c['notes']}")
+    if away:
+        if in_party:
+            lines.append("")
+        lines.append("ELSEWHERE")
+        for c in away:
+            lines.append(f"  ◌ {c['name']} ({c.get('kind', '?')}) -- {c.get('notes', '') or 'away'}")
+    ui.boxed("Companions", lines)
+
+
 def handle_command(cmd: str, state: GameState, save_path: Path) -> bool:
     """Returns True if the command was handled (don't send to DM)."""
     cmd = cmd.strip().lower()
@@ -143,6 +180,8 @@ def handle_command(cmd: str, state: GameState, save_path: Path) -> bool:
         _print_quests(state)
     elif cmd in ("/map", "/locations"):
         _print_map(state)
+    elif cmd in ("/companions", "/pets", "/party"):
+        _print_companions(state)
     elif cmd in ("/recap", "/last"):
         last = _last_dm_narration(state)
         if last:
@@ -276,6 +315,25 @@ def main() -> None:
             continue
 
         if user_input.startswith("/"):
+            head, _, rest = user_input.partition(" ")
+            if head.lower() in ("/ask", "/ooc"):
+                question = rest.strip()
+                if not question:
+                    ui.warn("Usage: /ask <question>   e.g.  /ask can I get a pet here?")
+                    continue
+                try:
+                    dm.ask_meta(state, question)
+                except KeyboardInterrupt:
+                    ui.warn("\nInterrupted.")
+                except Exception as e:
+                    ui.error(f"DM error: {e}")
+                    traceback.print_exc()
+                try:
+                    state.save(save_path)
+                except Exception as e:
+                    ui.error(f"Save failed: {e}")
+                continue
+
             if handle_command(user_input, state, save_path):
                 continue
             ui.warn(f"Unknown command. Type /help for the list. Or rephrase without the slash to talk to the DM.")

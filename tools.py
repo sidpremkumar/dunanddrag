@@ -12,7 +12,7 @@ from typing import Any, Callable
 import dice
 import ui
 from character import XP_TABLE, level_for_xp, xp_to_next, CLASSES
-from state import GameState
+from state import GameState, friendliness_tier as _friendliness_tier
 
 
 # --- Schemas -------------------------------------------------------------
@@ -266,6 +266,103 @@ TOOL_SCHEMAS = [
                     "reason": {"type": "string"},
                 },
                 "required": ["condition", "active"],
+            }},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "add_companion",
+            "description": (
+                "Add a pet, animal companion, or hireling-tier ally to the player's party. "
+                "Use when the player tames/befriends/hires/recruits a creature or person who "
+                "will travel with them. Companions have their own HP, AC, attack stats, and "
+                "a friendliness score (0-100). They act on the player's initiative in combat. "
+                "Pick stats appropriate to the creature: a stray dog ~10 HP, AC 13, +3 atk, "
+                "1d4+1 dmg; a warhorse ~20 HP, AC 11; a hawk ~5 HP, AC 13, +5 atk, 1d4 dmg. "
+                "Friendliness starts low for wild/wary creatures (10-30), mid for hired help (40-50), "
+                "high for grateful rescues (60-70)."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Companion's name (e.g. 'Bramble')."},
+                    "kind": {"type": "string", "description": "What it is, short ('wolfhound', 'hawk', 'hireling guard')."},
+                    "max_hp": {"type": "integer", "description": "Max (and starting) HP."},
+                    "ac": {"type": "integer", "description": "Armor class. Default 12 if omitted."},
+                    "attack_bonus": {"type": "integer", "description": "Attack roll bonus (e.g. 3). Omit for non-combatants."},
+                    "damage_dice": {"type": "string", "description": "Dice for damage on hit, e.g. '1d6+2'. Omit for non-combatants."},
+                    "friendliness": {"type": "integer", "description": "0-100. Default 40."},
+                    "notes": {"type": "string", "description": "Personality, how met, quirks."},
+                },
+                "required": ["name", "kind", "max_hp"],
+            }},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "update_companion",
+            "description": (
+                "Modify a companion's state. Use for: damage/healing in combat, friendliness "
+                "shifts (petting +5, ignoring -2, feeding +10, harming -30), sending one home "
+                "or recalling them (in_party), updating notes, or revising stats as they grow. "
+                "Friendliness clamps to 0-100. HP clamps to [0, max_hp]; HP 0 means downed."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Existing companion's name (case-insensitive)."},
+                    "hp_delta": {"type": "integer", "description": "Negative = damage, positive = healing."},
+                    "friendliness_delta": {"type": "integer", "description": "Change to friendliness, e.g. +5 for petting."},
+                    "in_party": {"type": "boolean", "description": "Set false to stable/send away, true to recall."},
+                    "notes": {"type": "string", "description": "Replace the companion's notes."},
+                    "ac": {"type": "integer", "description": "Override AC (e.g. after barding)."},
+                    "max_hp_delta": {"type": "integer", "description": "Change max HP (e.g. growth, training)."},
+                    "attack_bonus": {"type": "integer", "description": "Override attack bonus."},
+                    "damage_dice": {"type": "string", "description": "Override damage dice."},
+                    "reason": {"type": "string", "description": "Brief reason, for the log."},
+                },
+                "required": ["name"],
+            }},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "remove_companion",
+            "description": (
+                "Remove a companion permanently -- they died, ran off, betrayed the player, "
+                "or otherwise left for good. Items they carried are lost unless the DM "
+                "narrates retrieval first (call remove_item / add_item to move them back). "
+                "For temporary departures (stabled, sent home), use update_companion(in_party=false) instead."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "reason": {"type": "string", "description": "Why they're gone."},
+                },
+                "required": ["name", "reason"],
+            }},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "give_companion_item",
+            "description": (
+                "Move an item from the player's inventory into a companion's possession. "
+                "Use for feeding (treats, rations) or gifting (a collar, a toy, a trinket). "
+                "Bumps friendliness based on whether the item is something the companion "
+                "would value -- pass `friendliness_delta` (typically +5 for a snack, +10 "
+                "for a thoughtful gift, +20 for something prized like fresh meat to a hound)."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "companion_name": {"type": "string"},
+                    "item_name": {"type": "string", "description": "Must exist in player inventory."},
+                    "quantity": {"type": "integer", "description": "Default 1."},
+                    "friendliness_delta": {"type": "integer", "description": "Default +5."},
+                },
+                "required": ["companion_name", "item_name"],
             }},
         }
     },
@@ -538,15 +635,206 @@ def _exec_rest(state: GameState, args: dict) -> str:
         # Don't auto-clear conditions like 'cursed' that should be plot-driven;
         # the DM can still call set_condition afterward.
         p.conditions = [c for c in p.conditions if c not in {"poisoned", "frightened", "exhausted"}]
+        comp_msg = _heal_companions(state, "long")
         ui.event("REST", "Long rest: HP fully restored, basic conditions cleared.")
-        return "Player took a long rest. HP fully restored. Common conditions cleared."
+        return f"Player took a long rest. HP fully restored. Common conditions cleared.{comp_msg}"
     else:
         roll = dice.roll("1d8")
         heal = max(1, roll["total"] + p.stat_mod("CON"))
         before = p.hp
         p.hp = min(p.max_hp, p.hp + heal)
+        comp_msg = _heal_companions(state, "short")
         ui.event("REST", f"Short rest: rolled {roll['detail']} +CON = {heal}. HP {before} -> {p.hp}.")
-        return f"Player took a short rest. Healed {p.hp - before} HP. HP {p.hp}/{p.max_hp}."
+        return f"Player took a short rest. Healed {p.hp - before} HP. HP {p.hp}/{p.max_hp}.{comp_msg}"
+
+
+def _heal_companions(state: GameState, rest_type: str) -> str:
+    """Heal in-party companions during a rest. Long = full heal. Short = 1d6 each."""
+    healed = []
+    for c in state.companions:
+        if not c.get("in_party", True):
+            continue
+        max_hp = int(c.get("max_hp", 0))
+        if max_hp <= 0:
+            continue
+        before = int(c.get("hp", 0))
+        if rest_type == "long":
+            c["hp"] = max_hp
+        else:
+            roll = dice.roll("1d6")
+            c["hp"] = min(max_hp, before + max(1, roll["total"]))
+        if c["hp"] != before:
+            healed.append(f"{c['name']} {before}->{c['hp']}/{max_hp}")
+    if not healed:
+        return ""
+    line = "; ".join(healed)
+    ui.event("COMPANION", f"Rest healed: {line}.")
+    return f" Companions healed: {line}."
+
+
+def _find_companion(state: GameState, name: str) -> dict | None:
+    name_l = name.lower()
+    for c in state.companions:
+        if c.get("name", "").lower() == name_l:
+            return c
+    return None
+
+
+def _exec_add_companion(state: GameState, args: dict) -> str:
+    name = args["name"].strip()
+    if not name:
+        return "ERROR: companion name required."
+    if _find_companion(state, name):
+        return f"Companion '{name}' already exists. Use update_companion to modify."
+    max_hp = max(1, int(args.get("max_hp", 8)))
+    friendliness = max(0, min(100, int(args.get("friendliness", 40))))
+    ac = int(args.get("ac", 12))
+    comp = {
+        "name": name,
+        "kind": args.get("kind", "companion"),
+        "hp": max_hp,
+        "max_hp": max_hp,
+        "ac": ac,
+        "attack_bonus": args.get("attack_bonus"),
+        "damage_dice": args.get("damage_dice"),
+        "friendliness": friendliness,
+        "in_party": True,
+        "notes": args.get("notes", ""),
+        "inventory": [],
+    }
+    state.companions.append(comp)
+    tier = _friendliness_tier(friendliness)
+    ui.event("COMPANION", f"+{name} ({comp['kind']}) joined. HP {max_hp}, AC {ac}, friendliness {tier}.")
+    return f"Companion '{name}' ({comp['kind']}) added. HP {max_hp}/{max_hp}, AC {ac}, friendliness {friendliness} ({tier})."
+
+
+def _exec_update_companion(state: GameState, args: dict) -> str:
+    name = args["name"]
+    c = _find_companion(state, name)
+    if c is None:
+        return f"No companion named '{name}'."
+    msgs = []
+
+    if "hp_delta" in args and args["hp_delta"] is not None:
+        delta = int(args["hp_delta"])
+        before = int(c.get("hp", 0))
+        c["hp"] = max(0, min(int(c.get("max_hp", before)), before + delta))
+        msgs.append(f"HP {before}->{c['hp']}/{c['max_hp']}")
+        if c["hp"] == 0 and before > 0:
+            ui.event("COMPANION", f"{c['name']} is DOWN.")
+        elif delta < 0:
+            ui.event("COMPANION", f"{c['name']} took {-delta} dmg ({before}->{c['hp']}).")
+        elif delta > 0:
+            ui.event("COMPANION", f"{c['name']} healed {c['hp']-before} ({before}->{c['hp']}).")
+
+    if "max_hp_delta" in args and args["max_hp_delta"] is not None:
+        delta = int(args["max_hp_delta"])
+        c["max_hp"] = max(1, int(c.get("max_hp", 1)) + delta)
+        c["hp"] = min(int(c.get("hp", 0)), c["max_hp"])
+        msgs.append(f"max_hp now {c['max_hp']}")
+
+    if args.get("friendliness_delta"):  # truthy -- skip both None and 0
+        delta = int(args["friendliness_delta"])
+        before = int(c.get("friendliness", 50))
+        c["friendliness"] = max(0, min(100, before + delta))
+        before_tier = _friendliness_tier(before)
+        after_tier = _friendliness_tier(c["friendliness"])
+        if before_tier != after_tier:
+            ui.event("COMPANION", f"{c['name']} is now {after_tier} ({before_tier} -> {after_tier}).")
+        msgs.append(f"friendliness {before}->{c['friendliness']} ({after_tier})")
+
+    if "in_party" in args and args["in_party"] is not None:
+        new = bool(args["in_party"])
+        if new != bool(c.get("in_party", True)):
+            c["in_party"] = new
+            ui.event("COMPANION", f"{c['name']} {'rejoins the party' if new else 'leaves the party'}.")
+            msgs.append("rejoined party" if new else "left party")
+
+    if "ac" in args and args["ac"] is not None:
+        c["ac"] = int(args["ac"])
+        msgs.append(f"AC -> {c['ac']}")
+    if "attack_bonus" in args and args["attack_bonus"] is not None:
+        c["attack_bonus"] = int(args["attack_bonus"])
+        msgs.append(f"atk +{c['attack_bonus']}")
+    if "damage_dice" in args and args["damage_dice"]:
+        c["damage_dice"] = args["damage_dice"]
+        msgs.append(f"dmg {c['damage_dice']}")
+    if "notes" in args and args["notes"] is not None:
+        c["notes"] = args["notes"]
+        msgs.append("notes updated")
+
+    reason = args.get("reason") or ""
+    summary = "; ".join(msgs) if msgs else "no changes"
+    return f"{c['name']}: {summary}." + (f" ({reason})" if reason else "")
+
+
+def _exec_remove_companion(state: GameState, args: dict) -> str:
+    name = args["name"]
+    c = _find_companion(state, name)
+    if c is None:
+        return f"No companion named '{name}'."
+    state.companions.remove(c)
+    reason = args.get("reason", "")
+    ui.event("COMPANION", f"-{c['name']} ({c.get('kind', '')}) gone. {reason}")
+    return f"Companion '{c['name']}' removed. {reason}"
+
+
+def _exec_give_companion_item(state: GameState, args: dict) -> str:
+    cname = args["companion_name"]
+    iname = args["item_name"]
+    qty = max(1, int(args.get("quantity", 1)))
+    f_delta = int(args.get("friendliness_delta", 5))
+    c = _find_companion(state, cname)
+    if c is None:
+        return f"No companion named '{cname}'."
+    item = _find_item(state, iname)
+    if item is None:
+        return f"Player does not have any '{iname}' to give."
+    held = item.get("quantity", 1)
+    moved = min(qty, held)
+    # Mirror remove_item's logic in miniature: decrement or pop, and if
+    # the item was equipped on the player, unequip the affected slots
+    # and recompute AC. Otherwise an armored hero who gifts away their
+    # chainmail still "appears" to be wearing it.
+    unequipped_slots: list[str] = []
+    if moved >= held:
+        state.player.inventory.remove(item)
+        for slot, n in list(state.player.equipped.items()):
+            if n.lower() == item["name"].lower():
+                del state.player.equipped[slot]
+                unequipped_slots.append(slot)
+    else:
+        item["quantity"] = held - moved
+
+    # Add to companion's inventory (stacking by name).
+    c.setdefault("inventory", [])
+    existing = next((it for it in c["inventory"] if it["name"].lower() == item["name"].lower()), None)
+    if existing:
+        existing["quantity"] = existing.get("quantity", 1) + moved
+    else:
+        c["inventory"].append({
+            "name": item["name"],
+            "description": item.get("description", ""),
+            "quantity": moved,
+            "type": item.get("type", "misc"),
+            "properties": item.get("properties") or {},
+        })
+
+    before = int(c.get("friendliness", 50))
+    c["friendliness"] = max(0, min(100, before + f_delta))
+    before_tier = _friendliness_tier(before)
+    after_tier = _friendliness_tier(c["friendliness"])
+    ui.event("COMPANION", f"Gave {moved}x {item['name']} to {c['name']} (+{f_delta} friendliness, now {after_tier}).")
+
+    if unequipped_slots:
+        _recompute_ac(state)
+
+    tier_note = f" -- shifted from {before_tier} to {after_tier}" if before_tier != after_tier else ""
+    ac_note = f" Player unequipped from {', '.join(unequipped_slots)}; AC is now {state.player.ac}." if unequipped_slots else ""
+    return (
+        f"Gave {moved}x {item['name']} to {c['name']}. "
+        f"Friendliness {before}->{c['friendliness']} ({after_tier}){tier_note}.{ac_note}"
+    )
 
 
 def _exec_show_art(state: GameState, args: dict) -> str:
@@ -590,6 +878,10 @@ EXECUTORS: dict[str, Callable[[GameState, dict], str]] = {
     "rest": _exec_rest,
     "set_condition": _exec_set_condition,
     "show_art": _exec_show_art,
+    "add_companion": _exec_add_companion,
+    "update_companion": _exec_update_companion,
+    "remove_companion": _exec_remove_companion,
+    "give_companion_item": _exec_give_companion_item,
 }
 
 

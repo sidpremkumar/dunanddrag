@@ -410,6 +410,7 @@ _EVENT_COLORS: dict[str, str] = {
     "COMBAT": C.BRIGHT_RED + C.BOLD,
     "REST": C.GREEN,
     "CONDITION": C.BRIGHT_MAGENTA,
+    "COMPANION": C.BRIGHT_GREEN,
 }
 
 

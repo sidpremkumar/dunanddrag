@@ -95,6 +95,10 @@ class GameState:
     turn: int = 0
     in_combat: bool = False
     combat_summary: str = ""
+    # Pets / animal companions / hireling-tier allies. Each entry:
+    #   name, kind, hp, max_hp, ac, attack_bonus, damage_dice,
+    #   friendliness (0-100), in_party (bool), notes, inventory (list[dict])
+    companions: list[dict] = field(default_factory=list)
 
     @classmethod
     def new(cls, player: Character) -> "GameState":
@@ -121,7 +125,8 @@ class GameState:
             "turn": self.turn,
             "in_combat": self.in_combat,
             "combat_summary": self.combat_summary,
-            "schema_version": 1,
+            "companions": self.companions,
+            "schema_version": 2,
         }
 
     @classmethod
@@ -138,6 +143,7 @@ class GameState:
             turn=d.get("turn", 0),
             in_combat=d.get("in_combat", False),
             combat_summary=d.get("combat_summary", ""),
+            companions=d.get("companions", []),
         )
 
     def save(self, path: Path = DEFAULT_SAVE_PATH) -> None:
@@ -211,6 +217,66 @@ def _fmt_quests(quests: dict) -> str:
     return "\n".join(out)
 
 
+def friendliness_tier(score: int) -> str:
+    """0-100 friendliness mapped to a named tier."""
+    s = max(0, min(100, int(score)))
+    if s < 20:
+        return "wary"
+    if s < 40:
+        return "neutral"
+    if s < 60:
+        return "friendly"
+    if s < 80:
+        return "bonded"
+    return "devoted"
+
+
+def _fmt_companion_inv(inv: list[dict]) -> str:
+    if not inv:
+        return "(nothing)"
+    parts = []
+    for it in inv:
+        qty = f" x{it['quantity']}" if it.get("quantity", 1) > 1 else ""
+        parts.append(f"{it['name']}{qty}")
+    return ", ".join(parts)
+
+
+def _fmt_companions(comps: list[dict]) -> str:
+    if not comps:
+        return "  (none)"
+    out = []
+    in_party = [c for c in comps if c.get("in_party", True)]
+    away = [c for c in comps if not c.get("in_party", True)]
+    for c in in_party:
+        f_score = int(c.get("friendliness", 50))
+        tier = friendliness_tier(f_score)
+        atk = c.get("attack_bonus")
+        atk_s = f"+{atk}" if isinstance(atk, int) else "n/a"
+        hp = int(c.get("hp", 0))
+        max_hp = int(c.get("max_hp", 0))
+        # Downed = HP 0; flag it loudly so the DM doesn't roll attacks
+        # for an unconscious companion. Bloodied = at or below half HP.
+        if hp <= 0:
+            status = "  ** DOWNED -- cannot act; revive with update_companion(hp_delta=+N) **"
+        elif max_hp > 0 and hp <= max_hp // 2:
+            status = "  (bloodied)"
+        else:
+            status = ""
+        out.append(
+            f"  - {c['name']} ({c.get('kind', 'companion')}) "
+            f"HP {hp}/{max_hp}{status}  "
+            f"AC {c.get('ac', 10)}  atk {atk_s}  dmg {c.get('damage_dice', '-')}  "
+            f"friendliness {f_score}/100 ({tier})\n"
+            f"      carries: {_fmt_companion_inv(c.get('inventory', []))}\n"
+            f"      notes: {c.get('notes', '') or '(none)'}"
+        )
+    if away:
+        out.append("  -- not currently in party --")
+        for c in away:
+            out.append(f"  - {c['name']} ({c.get('kind', 'companion')}) -- {c.get('notes', '') or 'away'}")
+    return "\n".join(out)
+
+
 def _fmt_journal(journal: list[dict], n: int = 20) -> str:
     if not journal:
         return "  (the campaign has just begun)"
@@ -244,6 +310,9 @@ Equipped:
 
 # COMBAT
 {('IN COMBAT: ' + state.combat_summary) if state.in_combat else 'Not currently in combat.'}
+
+# COMPANIONS (pets / animal allies / hirelings; they act on the player's initiative)
+{_fmt_companions(state.companions)}
 
 # ACTIVE QUESTS
 {_fmt_quests(state.quests)}

@@ -73,6 +73,12 @@ happened in narration without calling the corresponding tool. This includes:
   - Entering or leaving combat -> call set_combat
   - Resting -> call rest
   - Acquiring or recovering from a condition -> call set_condition
+  - Gaining a pet/animal/hireling -> call add_companion
+  - A companion taking damage, healing, growing closer or more wary,
+    being sent home or recalled -> call update_companion
+  - A companion dying or leaving for good -> call remove_companion
+  - Giving a companion food, treats, gifts, or trinkets from inventory ->
+    call give_companion_item (this also shifts friendliness)
 
 You may chain multiple tools in one turn if a scene calls for it.
 
@@ -117,6 +123,41 @@ Constraints:
   proficient in that save).
 - Use roll_dice for ALL random outcomes. Do not invent numbers.
 
+# Out-of-character exchanges
+The conversation history may contain user messages tagged
+`[OUT-OF-CHARACTER QUESTION ...]` and assistant replies prefixed `[OOC]`.
+These are meta player-to-DM exchanges -- guidance, clarifications,
+"can I do X in this game?" -- NOT in-character actions. They did not
+happen in the world. NPCs did not hear them. Time did not pass. Do not
+journal them, do not let NPCs react to them, do not double back on
+information revealed in them as if it were freshly learned in-fiction.
+
+# Companions (pets, animals, hirelings)
+The player can have multiple companions in their party at once. Each has
+HP/AC/attack stats and a friendliness score 0-100 with named tiers:
+  wary (<20) - neutral (<40) - friendly (<60) - bonded (<80) - devoted (>=80)
+Friendliness shifts based on treatment:
+  - Petting / kind words / praise: +3 to +5
+  - Feeding a treat or sharing rations: +5 to +10
+  - Giving a thoughtful or prized gift: +10 to +20 (use give_companion_item)
+  - Saving them in combat or from harm: +10 to +25
+  - Ignoring them for a long stretch: -2
+  - Putting them in danger casually: -5 to -10
+  - Striking, starving, or betraying them: -20 to -50
+A devoted companion fights to the death for the player. A wary one may
+flee, refuse commands, or wander off. Roleplay this honestly.
+
+In combat, companions act on the player's initiative. Roll their attacks
+with their stored attack_bonus and damage_dice. They take damage like
+any creature -- call update_companion(hp_delta=-N) when hit. HP 0 means
+downed (not dead unless DM declares so or remove_companion is called).
+Resting (short or long) heals in-party companions automatically; you do
+not need a separate tool call for that.
+
+Show the player's companions in opening scenes and big moments -- they
+are part of the party. A `show_art` block of a new companion when first
+gained is a great fit.
+
 # Memory and continuity
 - The state snapshot below is rebuilt every turn from authoritative data.
 - The "RECENT JOURNAL ENTRIES" section is your long-term memory across
@@ -131,9 +172,30 @@ Constraints:
 # Combat
 - When combat starts, call set_combat(in_combat=true, summary=...).
 - On the player's turn, ask them their action.
-- On the enemies' turn, narrate and roll. Apply damage via change_hp.
+- Companions act on the SAME initiative as the player. Each round, after
+  the player acts, take a turn for every in-party companion with HP > 0:
+    1. Pick a sensible target (usually whoever is threatening the player).
+    2. Roll the attack: roll_dice('1d20', modifier=<companion.attack_bonus>,
+       reason='<Companion> bites the goblin', dc=<enemy AC>).
+    3. On hit, roll damage with the companion's stored damage_dice (e.g.
+       '1d6+1') and apply it. Enemies' HP isn't tracked in state -- you
+       narrate it -- but you MUST call update_companion(hp_delta=-N) when
+       the companion takes damage and change_hp(amount=-N) for the player.
+    4. Lower-friendliness companions are less reliable: a 'wary' pet may
+       refuse the order, fight at half-effort, or break and flee on its
+       turn. A 'devoted' one fights to the death and may even take a hit
+       meant for the player.
+- A companion at HP 0 is DOWNED, not dead. They can't take actions and
+  drop where they fell. Reviving mid-combat is possible: a healing
+  potion, a Cleric's Healing Word, etc. -- just call update_companion
+  (hp_delta=+N). They die only if you call remove_companion.
+- On the enemies' turn, narrate and roll. Apply damage via change_hp
+  (player) and update_companion (companions) -- enemies may target
+  either, especially the smaller/weaker ones first.
 - When combat ends, call set_combat(in_combat=false), award_xp for the
-  encounter, and journal the outcome.
+  encounter, and journal the outcome. If a companion was bloodied or
+  downed but survived, +5 to +10 friendliness for shared danger is
+  appropriate -- call update_companion.
 
 # Pacing
 - Brevity beats description. 2-5 sentences is the norm, not the floor.
@@ -275,7 +337,13 @@ class DungeonMaster:
         state.turn += 1
         state.messages.append({"role": "user", "content": [{"text": user_text}]})
 
-        max_iters = 12  # safety net against runaway tool loops
+        # Safety net against runaway tool loops. Each iteration is one
+        # Bedrock Converse call; the model can chain many tool_use blocks
+        # in a single message. A combat round with the player + multiple
+        # companions can legitimately take 3-5 iterations (attack roll,
+        # damage roll, hp updates, then enemy responses), so 16 gives
+        # ~3 rounds of headroom before the forced-close kicks in.
+        max_iters = 16
         try:
             for _ in range(max_iters):
                 response = self._converse_stream(state)
@@ -324,6 +392,42 @@ class DungeonMaster:
             # Roll back anything we added this turn so resume works cleanly.
             del state.messages[baseline_len:]
             state.turn -= 1
+            raise
+
+    def ask_meta(self, state: GameState, question: str) -> None:
+        """Out-of-character question to the DM. No state changes, no time
+        advancement, no scene progress. The DM answers briefly as a guide.
+
+        The exchange IS persisted in the message history (so future turns
+        can reference it), but `state.turn` is NOT incremented and no tools
+        are available, so no game state can mutate.
+        """
+        baseline_len = len(state.messages)
+        framed = (
+            "[OUT-OF-CHARACTER QUESTION -- not an in-game action]\n"
+            f"{question.strip()}"
+        )
+        state.messages.append({"role": "user", "content": [{"text": framed}]})
+        meta_override = (
+            "\n\n# OOC META MODE\n"
+            "The player just asked an out-of-character question (player-to-DM, "
+            "not in-character speech). Answer them directly as the DM/guide.\n"
+            "- 1-3 short sentences. No flowery language.\n"
+            "- DO NOT advance the scene, DO NOT have NPCs react, DO NOT pass time.\n"
+            "- DO NOT call any tools (none are available this turn anyway).\n"
+            "- Plainly say if something is not possible in this campaign / world. "
+            "  When you can, point at the closest in-world option (a person, a "
+            "  place, a quest hook) without committing the player to it.\n"
+            "- It is fine to break the fourth wall here. Prefix your reply with "
+            "  '[OOC]' so the player knows it is meta.\n"
+            "- Do NOT write a journal entry for this exchange."
+        )
+        try:
+            response = self._converse_stream(state, with_tools=False, system_suffix=meta_override)
+            msg, _ = self._consume_stream(response)
+            state.messages.append(msg)
+        except Exception:
+            del state.messages[baseline_len:]
             raise
 
     def opening_scene(self, state: GameState, opening_text: str) -> None:
