@@ -64,16 +64,16 @@ def make_test_character(name: str = "Aelor") -> Character:
 class FakeBedrockClient:
     """A scriptable stand-in for boto3's bedrock-runtime client.
 
-    Construct with a list of canned responses (in Bedrock Converse format).
-    Each call to converse() pops the next response. If a response in the
-    queue is an Exception instance, it's raised instead.
+    Construct with a list of canned responses in Bedrock ConverseStream
+    format -- each is a dict with a `stream` iterable of events. Exceptions
+    in the queue are raised when popped.
     """
 
     def __init__(self, responses: list):
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def converse(self, **kwargs):
+    def converse_stream(self, **kwargs):
         self.calls.append(kwargs)
         if not self.responses:
             raise AssertionError("FakeBedrockClient ran out of responses")
@@ -84,25 +84,43 @@ class FakeBedrockClient:
 
 
 def text_resp(text: str) -> dict:
-    return {
-        "output": {"message": {"role": "assistant", "content": [{"text": text}]}},
-        "stopReason": "end_turn",
-    }
+    """Stream-shaped response with a single text content block.
+
+    We split the text in halves to exercise the streaming path (multi-delta).
+    """
+    half = max(1, len(text) // 2)
+    events = [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text[:half]}}},
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text[half:]}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+    return {"stream": events}
 
 
 def tool_resp(tool_uses: list[dict], text: str = "") -> dict:
-    """tool_uses: list of {'id', 'name', 'input'}."""
-    content: list = []
+    """Stream-shaped response with optional leading text + N tool_use blocks."""
+    import json as _json
+    events = [{"messageStart": {"role": "assistant"}}]
+    idx = 0
     if text:
-        content.append({"text": text})
+        events.append({"contentBlockDelta": {"contentBlockIndex": idx, "delta": {"text": text}}})
+        events.append({"contentBlockStop": {"contentBlockIndex": idx}})
+        idx += 1
     for tu in tool_uses:
-        content.append({
-            "toolUse": {"toolUseId": tu["id"], "name": tu["name"], "input": tu["input"]}
-        })
-    return {
-        "output": {"message": {"role": "assistant", "content": content}},
-        "stopReason": "tool_use",
-    }
+        events.append({"contentBlockStart": {
+            "contentBlockIndex": idx,
+            "start": {"toolUse": {"toolUseId": tu["id"], "name": tu["name"]}},
+        }})
+        events.append({"contentBlockDelta": {
+            "contentBlockIndex": idx,
+            "delta": {"toolUse": {"input": _json.dumps(tu["input"])}},
+        }})
+        events.append({"contentBlockStop": {"contentBlockIndex": idx}})
+        idx += 1
+    events.append({"messageStop": {"stopReason": "tool_use"}})
+    return {"stream": events}
 
 
 def make_dm_with_responses(responses: list) -> "dm_mod.DungeonMaster":
@@ -266,6 +284,31 @@ def test_message_sanitization() -> None:
     ]
     cleaned = sanitize_messages(c)
     check("leading orphan toolResult dropped", cleaned and cleaned[0]["role"] != "user" or (cleaned[0]["role"] == "user" and any("text" in b for b in cleaned[0]["content"])))
+
+    # Case D-pre: an empty trailing assistant text must NOT cause the
+    # full opening scene to be peeled away. Regression test for the
+    # "(no prior narration found)" bug after resuming a fresh save.
+    opening = [
+        {"role": "user", "content": [{"text": "[GAME START] ..."}]},
+        {"role": "assistant", "content": [
+            {"text": "You push open the door of the inn..."},
+            {"toolUse": {"toolUseId": "n1", "name": "note_npc", "input": {"name": "Garrick"}}},
+        ]},
+        {"role": "user", "content": [{"toolResult": {"toolUseId": "n1", "content": [{"text": "ok"}]}}]},
+        {"role": "assistant", "content": [{"text": " "}]},   # whitespace-only close
+    ]
+    cleaned = sanitize_messages(opening)
+    check("opening-with-empty-close survives sanitize",
+          len(cleaned) == 4 and "Garrick" in str(cleaned[1]),
+          f"len={len(cleaned)}")
+    # And _last_dm_narration finds the inn description.
+    import game as _game_mod
+    class _S:
+        messages = cleaned
+    last = _game_mod._last_dm_narration(_S())
+    check("_last_dm_narration finds the inn narration after sanitize",
+          last is not None and "open the door" in last,
+          f"last={last!r}")
 
     # Case D: safe_trim never splits a tool pair.
     d = [

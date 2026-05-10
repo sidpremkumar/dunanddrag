@@ -182,17 +182,12 @@ SEED_NPCS = {
 
 
 CAMPAIGN_OPENING = """\
-You arrive in Stonehaven at dusk.
+Stonehaven. Dusk.
 
-The air carries the faint reek of sulfur on the western wind -- that's how you
-know Mt. Kaeloth still smolders, even though clouds hide its peak tonight. The
-village is small: maybe two dozen daub huts clustered around a muddy square, a
-wattle-walled longhouse with a faded wooden stag nailed above its door, and
-beyond, fields of barley turning silver in the failing light.
+A muddy square, two dozen daub huts, barley fields gone silver. The wind
+smells of sulfur -- Mt. Kaeloth, smoldering somewhere behind the clouds.
 
-You came for a reason. You can decide what that reason was.
+The Stag & Saddle is the only lit window. Voices and clatter inside.
 
-The longhouse -- the Stag & Saddle, by the look of the sign -- is the only
-place showing lamplight. Inside, you can hear muted voices and the clatter of
-crockery.
+You came for a reason. What was it?
 """

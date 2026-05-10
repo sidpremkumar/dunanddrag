@@ -236,21 +236,100 @@ def art_block(art: str, caption: str = "", color: str = C.BRIGHT_MAGENTA) -> Non
 
 
 def dm(text: str) -> None:
-    """Word-wrapped DM narration, indented with a subtle left bar."""
-    w = width()
-    inner = w - 4  # 2 for bar + space, 2 right margin
+    """Word-wrapped DM narration, indented with a subtle left bar.
 
-    print()
-    paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
-    for i, paragraph in enumerate(paragraphs):
-        # Collapse internal whitespace then wrap.
-        flat = " ".join(paragraph.split())
-        wrapped = textwrap.wrap(flat, width=inner) or [""]
-        for line in wrapped:
-            print(_c(C.BRIGHT_MAGENTA + C.DIM, B.V) + "  " + _c(C.BRIGHT_WHITE, line))
-        if i < len(paragraphs) - 1:
-            print(_c(C.BRIGHT_MAGENTA + C.DIM, B.V))
-    print()
+    Use this for one-shot prints (e.g. /recap, opening replays). For live
+    streaming from the model, use DMStream below.
+    """
+    stream = DMStream()
+    stream.write(text)
+    stream.end()
+
+
+class DMStream:
+    """Streams DM narration to the terminal token-by-token.
+
+    Buffers a partial word until a whitespace boundary so wrapping never
+    splits a word in the middle. Reuses the same `│` left-bar visual as
+    the static dm() renderer.
+    """
+
+    def __init__(self) -> None:
+        self.col = 0
+        self.indent = "  "  # space after the bar
+        self.bar_visible = "│" if _USE_UNICODE else "|"
+        self._started = False
+        self._buf = ""  # accumulating partial word
+
+    @property
+    def _indent_width(self) -> int:
+        # bar (1) + indent spaces
+        return 1 + len(self.indent)
+
+    def _bar_prefix(self) -> str:
+        return _c(C.BRIGHT_MAGENTA + C.DIM, self.bar_visible) + self.indent
+
+    def _start(self) -> None:
+        if not self._started:
+            sys.stdout.write("\n")
+            sys.stdout.write(self._bar_prefix())
+            self.col = self._indent_width
+            self._started = True
+
+    def _newline(self) -> None:
+        sys.stdout.write("\n")
+        sys.stdout.write(self._bar_prefix())
+        self.col = self._indent_width
+
+    def _emit_word(self, word: str) -> None:
+        if not word:
+            return
+        target_w = width() - 2  # right margin
+        sep_needed = self.col > self._indent_width
+        # If the word won't fit on the current line, wrap first.
+        if sep_needed and self.col + 1 + len(word) > target_w:
+            self._newline()
+            sep_needed = False
+        elif not sep_needed and len(word) > target_w - self._indent_width:
+            # Single word longer than the line. Just write it; terminal will
+            # hard-wrap. Avoid infinite loop.
+            pass
+        if sep_needed:
+            sys.stdout.write(" ")
+            self.col += 1
+        sys.stdout.write(_c(C.BRIGHT_WHITE, word))
+        self.col += len(word)
+
+    def write(self, text: str) -> None:
+        """Feed an incremental chunk of model output."""
+        if not text:
+            return
+        self._start()
+        for ch in text:
+            if ch == "\n":
+                if self._buf:
+                    self._emit_word(self._buf)
+                    self._buf = ""
+                self._newline()
+            elif ch == " " or ch == "\t":
+                if self._buf:
+                    self._emit_word(self._buf)
+                    self._buf = ""
+                # Spacing between words is handled inside _emit_word.
+            else:
+                self._buf += ch
+        sys.stdout.flush()
+
+    def end(self) -> None:
+        """Flush the trailing partial word and finish the block."""
+        if self._buf:
+            self._emit_word(self._buf)
+            self._buf = ""
+        if self._started:
+            sys.stdout.write("\n\n")
+            sys.stdout.flush()
+        self._started = False
+        self.col = 0
 
 
 # --- Status line ---------------------------------------------------------
@@ -290,7 +369,15 @@ def status_line(player, location: str) -> None:
 
 
 def system(text: str) -> None:
-    print(_c(C.GREY + C.DIM, text))
+    """Instructional / informational text. Readable cyan -- not 'dim grey'
+    which renders almost invisibly on many terminals."""
+    print(_c(C.BRIGHT_CYAN, text))
+
+
+def hint(text: str) -> None:
+    """A faint inline hint. Use sparingly -- this is the only style that's
+    intentionally low-contrast (e.g. for status lines like 'DM model: ...')."""
+    print(_c(C.GREY, text))
 
 
 def warn(text: str) -> None:

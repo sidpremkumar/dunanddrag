@@ -274,12 +274,13 @@ TOOL_SCHEMAS = [
             "name": "show_art",
             "description": (
                 "Render a multi-line ASCII art picture in a framed panel for the player. "
-                "Use sparingly for atmosphere -- when the player first arrives at a notable "
-                "location (a town's silhouette, a dungeon entrance, the dragon's mountain), "
-                "when they meet a memorable character (portrait), or when they obtain a "
-                "notable magic item. Do NOT use it every turn. The art should be hand-drawn "
-                "ASCII (use only printable chars, max ~70 columns wide, ~12 rows tall). "
-                "Don't include color codes; the renderer adds color."
+                "Use it OFTEN -- roughly one piece every 2-4 turns whenever there is "
+                "something concrete to draw: a new location (silhouette, gate, room layout), "
+                "an NPC's face or sigil, a creature in combat, a weapon or magic item, a "
+                "map, a mood beat (campfire, rain, ruin). Skip only when nothing visual "
+                "changed. Hand-drawn printable ASCII / box-drawing chars, max ~70 cols x "
+                "~12 rows. Aim for RECOGNIZABLE shapes (a tree, a sword, a face), not "
+                "abstract scribbles. No color codes; the renderer adds color."
             ),
             "inputSchema": {"json": {
                 "type": "object",

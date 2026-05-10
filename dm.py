@@ -14,6 +14,7 @@ if your account uses a different profile or region.
 
 from __future__ import annotations
 
+import json
 import os
 
 import boto3
@@ -40,13 +41,24 @@ You are the Dungeon Master for a D&D-style solo campaign called
 "{CAMPAIGN_TITLE}". The player is the sole hero. You voice the world
 and every NPC.
 
-# How to narrate
-- Second person, present tense ("you push open the door...").
-- 1-4 paragraphs per response, unless a long scene calls for more.
-- Voice each NPC distinctly. Once you've established a voice, stick to it.
-- Telegraph danger, give the player real choices, and never railroad.
-- Keep tone consistent with the campaign bible below: high fantasy, leans
-  grim with sparks of warmth and humor.
+# How to narrate -- BE TERSE
+- Second person, present tense ("you push open the door").
+- DEFAULT to 2-5 short sentences per response. One paragraph max.
+  Only go longer (still capped at 2 short paragraphs) for genuine set
+  pieces -- a new location, a boss reveal, the end of a major scene.
+- Plain words over fancy ones. "smell" not "miasma", "old" not "ancient",
+  "dark" not "stygian". No purple prose. No piled-up adjectives.
+- Cut filler: "the air carries the faint reek of...", "you feel a sense
+  of...", "as you step forward..." -- delete these. State the thing.
+- Show, don't decorate. One concrete sensory detail beats three vague
+  evocative ones. Pick the sharpest one and stop.
+- NPC dialogue: short. Real people speak in fragments and interruptions,
+  not monologues. 1-2 lines per turn unless a speech is the point.
+- Voice each NPC distinctly, then stick to it.
+- End most turns with a clear hook -- what they see, hear, or are asked.
+  Don't list options. Don't ask "what do you do?" every turn; the prompt
+  is implied.
+- Telegraph danger, give real choices, never railroad.
 
 # Tool use is mandatory for state changes
 You have tools to mutate the game state. NEVER claim a state change
@@ -64,20 +76,32 @@ happened in narration without calling the corresponding tool. This includes:
 
 You may chain multiple tools in one turn if a scene calls for it.
 
-# Atmosphere: ASCII art (sparingly)
-You have a `show_art` tool that renders a framed ASCII picture for the
-player. Use it for *memorable* moments only -- never every turn.
-Good times to use it:
-  - First arrival at a notable place (a town silhouette from the road,
-    a dungeon's gates, the smoking peak of Mt. Kaeloth).
-  - Meeting a key NPC for the first time (a small portrait or sigil).
-  - Acquiring a notable magic item (a sketch of the item).
-  - A climactic reveal (the dragon's eye, a glowing artifact).
+# Atmosphere: ASCII art -- USE IT OFTEN
+You have a `show_art` tool that renders a framed ASCII picture. The
+player has explicitly asked for more art. Lean in. Aim for roughly one
+piece of art every 2-4 turns when there's something concrete to draw.
+Skip art only when nothing visual changed (e.g. pure dialogue continuation).
+
+Strong reasons to draw:
+  - Arriving anywhere new -- village, road, forest, ruin, room (silhouette,
+    layout, gate, doorway).
+  - Meeting an NPC for the first time (small portrait or sigil).
+  - Combat openings -- show the foe(s), the terrain, or both.
+  - Loot: weapons, armor, scrolls, magic items -- sketch them.
+  - Reveals: a map, a symbol, a creature in the dark, a dragon's eye.
+  - Travel montages: the road, a campfire, a passing landmark.
+  - Mood beats: rain over a graveyard, a still pond, a closed door.
+
 Constraints:
-  - Use only printable ASCII / common box-drawing chars.
-  - Max ~70 columns wide and ~12 rows tall.
-  - Hand-draw it inline; do not embed color codes.
-  - One art block per turn at most. Skip entirely if nothing warrants it.
+  - Printable ASCII / common box-drawing chars only. NO color codes.
+  - Max ~70 columns wide, ~12 rows tall. The frame is added for you.
+  - Hand-draw inline. Make it RECOGNIZABLE -- a tree, a sword, a face,
+    a building -- not abstract scribbles. Stick figures and silhouettes
+    are fine; aim for clarity over detail.
+  - One art block per turn (you can call show_art at most once).
+  - Pair the art with a SHORT caption (5-10 words) and ~1-2 sentences
+    of narration -- the picture carries weight, the prose doesn't have
+    to repeat what it shows.
 
 # Dice and DCs (D&D-lite)
 - Easy DC 10, Medium DC 15, Hard DC 20, Very Hard DC 25.
@@ -112,11 +136,9 @@ Constraints:
   encounter, and journal the outcome.
 
 # Pacing
-- Don't over-describe. A four-paragraph response is the upper bound for
-  most turns. A single tense paragraph is fine in fast scenes.
-- End most responses by giving the player a clear sense of what they can
-  see, hear, or do -- but don't list explicit menu options. They have
-  free input.
+- Brevity beats description. 2-5 sentences is the norm, not the floor.
+- One tight paragraph beats two flowery ones. Cut.
+- Free input -- don't list menu options.
 
 Below is the campaign bible. Internalize it.
 """
@@ -154,8 +176,9 @@ class DungeonMaster:
         session = boto3.Session(profile_name=self.profile) if self.profile else boto3.Session()
         self.client = session.client("bedrock-runtime", region_name=self.region, config=cfg)
 
-    def _converse(self, state: GameState, with_tools: bool = True, system_suffix: str = ""):
-        """Single Bedrock Converse call. Isolated so it's mockable in tests."""
+    def _converse_stream(self, state: GameState, with_tools: bool = True, system_suffix: str = ""):
+        """Single Bedrock ConverseStream call. Returns the boto3 response.
+        The caller is responsible for consuming `response['stream']`."""
         kwargs = dict(
             modelId=self.model_id,
             messages=state.messages,
@@ -164,7 +187,82 @@ class DungeonMaster:
         )
         if with_tools:
             kwargs["toolConfig"] = {"tools": TOOL_SCHEMAS}
-        return self.client.converse(**kwargs)
+        return self.client.converse_stream(**kwargs)
+
+    def _consume_stream(self, response) -> tuple[dict, str | None]:
+        """Walk a streaming Converse response, printing text deltas live.
+
+        Returns the assembled assistant message (Bedrock Converse format)
+        and the final stopReason.
+        """
+        # Map from contentBlockIndex -> in-progress block dict. For text
+        # blocks we accumulate the printed text. For tool_use blocks we
+        # accumulate the JSON-string input fragments and parse at stop.
+        blocks: dict[int, dict] = {}
+        order: list[int] = []  # preserve content-block order for the final list
+        stop_reason: str | None = None
+        text_stream = ui.DMStream()
+
+        for event in response["stream"]:
+            if "messageStart" in event:
+                continue
+            if "contentBlockStart" in event:
+                idx = event["contentBlockStart"]["contentBlockIndex"]
+                start = event["contentBlockStart"].get("start") or {}
+                if "toolUse" in start:
+                    tu = start["toolUse"]
+                    blocks[idx] = {
+                        "kind": "toolUse",
+                        "toolUseId": tu["toolUseId"],
+                        "name": tu["name"],
+                        "input_str": "",
+                    }
+                if idx not in order:
+                    order.append(idx)
+                continue
+            if "contentBlockDelta" in event:
+                idx = event["contentBlockDelta"]["contentBlockIndex"]
+                delta = event["contentBlockDelta"]["delta"]
+                if "text" in delta:
+                    if idx not in blocks:
+                        blocks[idx] = {"kind": "text", "text": ""}
+                        if idx not in order:
+                            order.append(idx)
+                    blocks[idx]["text"] += delta["text"]
+                    text_stream.write(delta["text"])
+                elif "toolUse" in delta:
+                    if idx in blocks and blocks[idx].get("kind") == "toolUse":
+                        blocks[idx]["input_str"] += delta["toolUse"].get("input", "")
+                continue
+            if "contentBlockStop" in event:
+                continue
+            if "messageStop" in event:
+                stop_reason = event["messageStop"].get("stopReason")
+                continue
+            # metadata, throttling, etc. — ignore.
+
+        text_stream.end()
+
+        # Assemble final message in Bedrock Converse format.
+        content: list[dict] = []
+        for idx in order:
+            block = blocks.get(idx)
+            if not block:
+                continue
+            if block["kind"] == "text":
+                content.append({"text": block["text"]})
+            elif block["kind"] == "toolUse":
+                raw = block.get("input_str", "").strip()
+                try:
+                    parsed = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    parsed = {}
+                content.append({"toolUse": {
+                    "toolUseId": block["toolUseId"],
+                    "name": block["name"],
+                    "input": parsed,
+                }})
+        return {"role": "assistant", "content": content}, stop_reason
 
     def take_turn(self, state: GameState, user_text: str) -> None:
         """Run one player turn end-to-end, including any DM tool loops.
@@ -180,16 +278,10 @@ class DungeonMaster:
         max_iters = 12  # safety net against runaway tool loops
         try:
             for _ in range(max_iters):
-                response = self._converse(state)
-                msg = response["output"]["message"]
+                response = self._converse_stream(state)
+                msg, stop_reason = self._consume_stream(response)
                 state.messages.append(msg)
 
-                # Print any narration text
-                for block in msg["content"]:
-                    if "text" in block and block["text"].strip():
-                        ui.dm(block["text"])
-
-                stop_reason = response.get("stopReason")
                 if stop_reason != "tool_use":
                     break
 
@@ -217,7 +309,7 @@ class DungeonMaster:
                 # with no toolConfig at all (the model literally cannot emit
                 # tool_use blocks) plus a system override saying so.
                 ui.warn("DM hit the tool-use safety cap. Forcing a closing narration.")
-                response = self._converse(
+                response = self._converse_stream(
                     state,
                     with_tools=False,
                     system_suffix=(
@@ -226,11 +318,8 @@ class DungeonMaster:
                         "narration (1-2 paragraphs) that wraps the scene, and stop."
                     ),
                 )
-                msg = response["output"]["message"]
+                msg, _ = self._consume_stream(response)
                 state.messages.append(msg)
-                for block in msg["content"]:
-                    if "text" in block and block["text"].strip():
-                        ui.dm(block["text"])
         except Exception:
             # Roll back anything we added this turn so resume works cleanly.
             del state.messages[baseline_len:]
@@ -246,11 +335,11 @@ class DungeonMaster:
         # to the player, and can follow up consistently.
         seed = (
             "[GAME START]\n\n"
-            "The following opening scene has just been narrated to the player. "
-            "Continue from here as DM. Voice the inn briefly (sights, sounds, "
-            "anyone present), and prompt the player for their first action. "
-            "Call note_npc for any NPC you introduce. Keep the response to "
-            "2 short paragraphs.\n\n"
+            "The opening above was just shown to the player. Continue as DM. "
+            "Step inside the Stag & Saddle: 3-5 short sentences total. Pick ONE "
+            "concrete sight, ONE sound, and name 1-2 people present. Strongly "
+            "consider a show_art block of the inn's interior or a patron. Call "
+            "note_npc for anyone you introduce. End on a hook, not a question.\n\n"
             "----- OPENING SCENE -----\n"
             f"{opening_text.strip()}\n"
             "----- END OPENING SCENE -----"

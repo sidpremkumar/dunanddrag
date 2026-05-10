@@ -34,12 +34,15 @@ def _is_clean_user_text(msg: dict) -> bool:
 
 
 def _is_clean_assistant_close(msg: dict) -> bool:
+    """A trailing assistant message is 'clean' iff it has no orphan toolUse.
+    An empty/whitespace text block is fine -- it just means no narration to
+    display. Stripping such a message would cascade past valid earlier turns
+    (because their assistant message contains a tool_use that is, however,
+    properly paired with a following toolResult)."""
     if msg.get("role") != "assistant":
         return False
     content = msg.get("content") or []
-    has_text = any("text" in b and b["text"].strip() for b in content)
-    has_tool_use = any("toolUse" in b for b in content)
-    return has_text and not has_tool_use
+    return not any("toolUse" in b for b in content)
 
 
 def sanitize_messages(messages: list[dict]) -> list[dict]:
