@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile dice.py world.py ui.py character.py state.py tools.py dm.py game.py)"
+    ]
+  }
+}
