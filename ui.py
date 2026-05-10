@@ -20,6 +20,14 @@ import shutil
 import sys
 import textwrap
 
+# Importing readline (when available) transparently upgrades the built-in
+# input() to support backspace, arrow keys, line history, and editing.
+# We don't use the module directly -- the import alone hooks it in.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass  # not available on some platforms (e.g. vanilla Windows)
+
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 _USE_UNICODE = os.environ.get("ASCII_ONLY") is None
 
@@ -347,9 +355,24 @@ def roll(label: str, total: int, detail: str, dc: int | None = None) -> None:
 # --- Prompt --------------------------------------------------------------
 
 
+import re as _re
+
+# Wrap ANSI escapes inside \001...\002 so readline / GNU editline does NOT
+# count them as visible characters when computing cursor position. Without
+# this, editing a long input line (or hitting home/end) lands the cursor in
+# the wrong column on terminals that use readline.
+_ANSI_RE = _re.compile(r"(\033\[[0-9;]*m)")
+
+
+def _readline_safe(text: str) -> str:
+    return _ANSI_RE.sub(lambda m: "\001" + m.group(1) + "\002", text)
+
+
 def prompt(prefix: str = "> ") -> str:
+    colored = _c(C.BRIGHT_CYAN + C.BOLD, prefix)
+    safe = _readline_safe(colored)
     try:
-        return input(_c(C.BRIGHT_CYAN + C.BOLD, prefix))
+        return input(safe)
     except EOFError:
         return "/quit"
 
