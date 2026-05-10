@@ -16,7 +16,7 @@ Slash commands during play:
     /companions  show pets/animals/hirelings and their stats
     /ask <q>     ask the DM an OOC question (e.g. /ask can I get a pet?)
     /save        save now (also auto-saves every turn)
-    /quit        save and exit
+    /quit        exit (prompts before saving)
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ HELP_TEXT = """\
   /recap       reprint the most recent DM narration
   /ask <q>     ask the DM an out-of-character question (no time passes)
   /save        save now (also auto-saves every turn)
-  /quit        save and exit
+  /quit        exit (prompts before saving)
 
 Anything else is sent to the Dungeon Master as an in-character action.
 Use /ask for meta questions like "can I get a pet?" or "what's nearby?"
@@ -195,11 +195,16 @@ def handle_command(cmd: str, state: GameState, save_path: Path) -> bool:
         except Exception as e:
             ui.error(f"Save failed: {e}")
     elif cmd in ("/quit", "/exit", "/q!"):
-        try:
-            state.save(save_path)
-            ui.success(f"Saved to {save_path}. Farewell.")
-        except Exception as e:
-            ui.error(f"Save failed: {e}. Quitting anyway.")
+        answer = ui.prompt(f"Save to {save_path} before quitting? [Y/n] ").strip().lower()
+        if answer in ("n", "no"):
+            ui.system("Quitting without saving.")
+        else:
+            try:
+                state.save(save_path)
+                ui.success(f"Saved to {save_path}.")
+            except Exception as e:
+                ui.error(f"Save failed: {e}. Quitting anyway.")
+        ui.success("Farewell.")
         sys.exit(0)
     else:
         return False

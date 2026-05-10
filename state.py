@@ -93,6 +93,9 @@ class GameState:
     journal: list[dict] = field(default_factory=list)  # [{ "turn": int, "text": str }]
     messages: list[dict] = field(default_factory=list)  # Bedrock Converse format
     turn: int = 0
+    # In-game day counter. Day 1 is start. Long rest auto-advances by 1.
+    # The DM can also call advance_time(days=N) for travel / montages.
+    day: int = 1
     in_combat: bool = False
     combat_summary: str = ""
     # Pets / animal companions / hireling-tier allies. Each entry:
@@ -123,10 +126,11 @@ class GameState:
             "journal": self.journal,
             "messages": safe_trim(self.messages, MAX_HISTORY_MESSAGES),
             "turn": self.turn,
+            "day": self.day,
             "in_combat": self.in_combat,
             "combat_summary": self.combat_summary,
             "companions": self.companions,
-            "schema_version": 2,
+            "schema_version": 3,
         }
 
     @classmethod
@@ -141,6 +145,7 @@ class GameState:
             # Sanitize on load so an interrupted save can never wedge resume.
             messages=sanitize_messages(d.get("messages", [])),
             turn=d.get("turn", 0),
+            day=int(d.get("day", 1)),
             in_combat=d.get("in_combat", False),
             combat_summary=d.get("combat_summary", ""),
             companions=d.get("companions", []),
@@ -288,14 +293,28 @@ def render_state_snapshot(state: GameState) -> str:
     stats_line = "  ".join(f"{s} {p.stats[s]:>2} ({p.stat_mod(s):+d})"
                            for s in ["STR", "DEX", "CON", "INT", "WIS", "CHA"])
     location = state.locations.get(state.player_location, {})
+    # Spell slots line: only show for casters (non-empty spell_slots_max).
+    if p.spell_slots_max:
+        slot_strs = [f"L{lvl} {p.spell_slots.get(lvl, 0)}/{p.spell_slots_max[lvl]}"
+                     for lvl in sorted(p.spell_slots_max.keys())]
+        spell_slots_line = f"Spell slots: {'  '.join(slot_strs)}\n"
+    else:
+        spell_slots_line = ""
+    # HP-0 player flag: mirror the companion DOWNED treatment so the DM
+    # never tries to roll an attack for an unconscious hero.
+    if p.hp <= 0:
+        hp_flag = ("\n** UNCONSCIOUS -- HP is 0; the player cannot act, attack, "
+                   "or cast until healed (change_hp +N) or revived. **")
+    else:
+        hp_flag = ""
     return f"""\
 # CURRENT PLAYER
 Name: {p.name}
 Race/Class: {p.race} {p.char_class}, level {p.level}
-HP: {p.hp}/{p.max_hp}     AC: {p.ac}     Gold: {p.gold}     XP: {p.xp}
+HP: {p.hp}/{p.max_hp}     AC: {p.ac}     Gold: {p.gold}     XP: {p.xp}{hp_flag}
 Proficiency: +{p.proficiency()}
 Stats: {stats_line}
-Conditions: {', '.join(p.conditions) if p.conditions else 'none'}
+{spell_slots_line}Conditions: {', '.join(p.conditions) if p.conditions else 'none'}
 Background: {p.background}
 
 Inventory:
@@ -326,6 +345,6 @@ Equipped:
 # RECENT JOURNAL ENTRIES (your long-term memory)
 {_fmt_journal(state.journal, 25)}
 
-# TURN
-This is turn {state.turn + 1} of the campaign.
+# TURN & TIME
+Turn {state.turn + 1}.  Day {state.day} of the campaign.
 """

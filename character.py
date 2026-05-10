@@ -148,6 +148,11 @@ class Character:
     inventory: list = field(default_factory=list)
     equipped: dict = field(default_factory=dict)  # slot -> item name
     conditions: list = field(default_factory=list)  # e.g. "poisoned", "blessed"
+    # Spell slots per level. Keys are stringified slot levels ("1", "2", ...).
+    # `spell_slots` is current remaining; `spell_slots_max` is the daily cap.
+    # Non-casters have both empty. Long rest restores remaining to max.
+    spell_slots: dict = field(default_factory=dict)
+    spell_slots_max: dict = field(default_factory=dict)
 
     def stat_mod(self, stat: str) -> int:
         return (self.stats[stat] - 10) // 2
@@ -171,6 +176,8 @@ class Character:
             "inventory": list(self.inventory),
             "equipped": dict(self.equipped),
             "conditions": list(self.conditions),
+            "spell_slots": dict(self.spell_slots),
+            "spell_slots_max": dict(self.spell_slots_max),
         }
 
     @classmethod
@@ -196,6 +203,8 @@ class Character:
             inventory=list(d.get("inventory", [])),
             equipped=dict(d.get("equipped", {})),
             conditions=list(d.get("conditions", [])),
+            spell_slots={str(k): int(v) for k, v in (d.get("spell_slots") or {}).items()},
+            spell_slots_max={str(k): int(v) for k, v in (d.get("spell_slots_max") or {}).items()},
         )
 
 
@@ -339,6 +348,13 @@ def create_character() -> Character:
         equipped={},
     )
 
+    # Full casters start with three level-1 slots; non-casters get nothing.
+    # Multi-class / higher-level slots are out of scope for now -- the DM
+    # narrates more advanced magic but mechanically only L1 slots are tracked.
+    if char_class in ("Wizard", "Cleric"):
+        char.spell_slots_max = {"1": 3}
+        char.spell_slots = {"1": 3}
+
     # Auto-equip armor + main weapon
     for it in char.inventory:
         if it["type"] == "armor":
@@ -364,6 +380,11 @@ def print_sheet(char: Character) -> None:
     lines.append("ABILITY SCORES")
     for s in ["STR", "DEX", "CON", "INT", "WIS", "CHA"]:
         lines.append(f"  {s}  {char.stats[s]:>2}  ({char.stat_mod(s):+d})")
+    if char.spell_slots_max:
+        lines.append("")
+        slot_strs = [f"L{lvl} {char.spell_slots.get(lvl, 0)}/{char.spell_slots_max[lvl]}"
+                     for lvl in sorted(char.spell_slots_max.keys())]
+        lines.append("SPELL SLOTS  " + "  ".join(slot_strs))
     if char.conditions:
         lines.append("")
         lines.append("CONDITIONS  " + ", ".join(char.conditions))

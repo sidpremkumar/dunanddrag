@@ -455,10 +455,27 @@
           "text": "---\n\nYou wake to pale dawn light filtering through the window and the distant crow of a rooster. The smell of woodsmoke and frying eggs drifts up from below. Your body feels rested, your mind sharp.\n\nThrough the window, Mt. Kaeloth looms against the brightening sky, its peak wreathed in the same thin curl of smoke. Closer, to the south, you can see a smudge of gray stone rising above the treeline\u2014Old Wynn's tower, perhaps a mile or two's walk through the fields.\n\nThe day stretches before you, full of possibility."
         }
       ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "text": "[OUT-OF-CHARACTER QUESTION -- not an in-game action]\nwhat are my stats"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "[OOC] Here are your stats:\n\n**Benito** \u2014 Elf Rogue, Level 1\n- **HP:** 9/9 | **AC:** 15 | **Gold:** 22 | **XP:** 0\n- **Proficiency Bonus:** +2\n\n| Stat | Score | Modifier |\n|------|-------|----------|\n| STR | 10 | +0 |\n| DEX | 19 | +4 |\n| CON | 12 | +1 |\n| INT | 17 | +3 |\n| WIS | 15 | +2 |\n| CHA | 10 | +0 |\n\n**Equipped:** Shortsword (mainhand), Leather Armor\n\n**Inventory:** Shortbow, Thieves' tools, Adventurer's pack (bedroll, tinderbox, 5 days rations, waterskin, rope)\n\nYour DEX is excellent\u2014lean into stealth, finesse attacks, and lockpicking. CHA is average, so charm attempts will be tougher."
+        }
+      ]
     }
   ],
   "turn": 6,
   "in_combat": false,
   "combat_summary": "",
-  "schema_version": 1
+  "companions": [],
+  "schema_version": 2
 }

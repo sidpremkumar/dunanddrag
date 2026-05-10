@@ -368,6 +368,50 @@ TOOL_SCHEMAS = [
     },
     {
         "toolSpec": {
+            "name": "change_spell_slots",
+            "description": (
+                "Adjust the player's spell slots. Call with delta=-1 when the "
+                "player casts a leveled spell at that slot level (cantrips do "
+                "NOT spend slots). Call with positive delta only for one-off "
+                "restorations (Wizard's Arcane Recovery, a magic item, a boon). "
+                "A long rest auto-restores all slots -- do not call this for "
+                "normal rests. Returns the resulting slots/max. Non-casters "
+                "have no slots and the call will report that."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "integer", "description": "Slot level (1, 2, 3...). Default 1."},
+                    "delta": {"type": "integer", "description": "Negative to spend, positive to restore. Clamps to [0, max]."},
+                    "reason": {"type": "string", "description": "What spell or effect, e.g. 'cast Magic Missile'."},
+                },
+                "required": ["delta", "reason"],
+            }},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "advance_time",
+            "description": (
+                "Advance the in-game day counter. Call when the fiction passes "
+                "real time -- a day on the road, a week of training, an "
+                "overnight wait. A long rest already auto-advances by 1 day, "
+                "so do NOT also call this for a normal night's sleep. Vorthrax's "
+                "tribute deadline is roughly day 60 of the campaign; use the "
+                "day counter to keep that pressure honest."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Days passed (positive integer)."},
+                    "reason": {"type": "string", "description": "What passed the time, e.g. 'two days on the King's Road'."},
+                },
+                "required": ["days", "reason"],
+            }},
+        }
+    },
+    {
+        "toolSpec": {
             "name": "show_art",
             "description": (
                 "Render a multi-line ASCII art picture in a framed panel for the player. "
@@ -635,9 +679,17 @@ def _exec_rest(state: GameState, args: dict) -> str:
         # Don't auto-clear conditions like 'cursed' that should be plot-driven;
         # the DM can still call set_condition afterward.
         p.conditions = [c for c in p.conditions if c not in {"poisoned", "frightened", "exhausted"}]
+        # Restore all spell slots to their daily max.
+        slot_msg = ""
+        if p.spell_slots_max:
+            p.spell_slots = dict(p.spell_slots_max)
+            slot_msg = f" Spell slots restored: {dict(p.spell_slots)}."
+        # A long rest is overnight -- advance the day counter.
+        state.day += 1
         comp_msg = _heal_companions(state, "long")
-        ui.event("REST", "Long rest: HP fully restored, basic conditions cleared.")
-        return f"Player took a long rest. HP fully restored. Common conditions cleared.{comp_msg}"
+        ui.event("REST", f"Long rest: HP full, conditions cleared, slots restored. Day {state.day}.")
+        return (f"Player took a long rest. HP fully restored. Common conditions cleared."
+                f"{slot_msg} A new day dawns -- now day {state.day} of the campaign.{comp_msg}")
     else:
         roll = dice.roll("1d8")
         heal = max(1, roll["total"] + p.stat_mod("CON"))
@@ -646,6 +698,35 @@ def _exec_rest(state: GameState, args: dict) -> str:
         comp_msg = _heal_companions(state, "short")
         ui.event("REST", f"Short rest: rolled {roll['detail']} +CON = {heal}. HP {before} -> {p.hp}.")
         return f"Player took a short rest. Healed {p.hp - before} HP. HP {p.hp}/{p.max_hp}.{comp_msg}"
+
+
+def _exec_change_spell_slots(state: GameState, args: dict) -> str:
+    level = str(args.get("level", 1))
+    delta = int(args["delta"])
+    reason = args.get("reason", "")
+    p = state.player
+    max_at_level = int(p.spell_slots_max.get(level, 0))
+    if max_at_level <= 0:
+        return f"Player has no level-{level} spell slots to change."
+    before = int(p.spell_slots.get(level, 0))
+    p.spell_slots[level] = max(0, min(max_at_level, before + delta))
+    after = p.spell_slots[level]
+    if delta < 0:
+        ui.event("SPELL", f"Cast L{level} ({reason}). Slots: {before}->{after}/{max_at_level}.")
+    elif delta > 0:
+        ui.event("SPELL", f"Recovered L{level} slot ({reason}). {before}->{after}/{max_at_level}.")
+    return f"Level-{level} slots: {before} -> {after}/{max_at_level} ({reason})."
+
+
+def _exec_advance_time(state: GameState, args: dict) -> str:
+    days = max(0, int(args.get("days", 0)))
+    reason = args.get("reason", "")
+    if days == 0:
+        return "No time passed (days=0)."
+    before = state.day
+    state.day += days
+    ui.event("TIME", f"+{days} day(s) passed: {reason}. Day {before} -> {state.day}.")
+    return f"Time advanced {days} day(s). Now day {state.day} of the campaign. ({reason})"
 
 
 def _heal_companions(state: GameState, rest_type: str) -> str:
@@ -877,6 +958,8 @@ EXECUTORS: dict[str, Callable[[GameState, dict], str]] = {
     "journal": _exec_journal,
     "rest": _exec_rest,
     "set_condition": _exec_set_condition,
+    "change_spell_slots": _exec_change_spell_slots,
+    "advance_time": _exec_advance_time,
     "show_art": _exec_show_art,
     "add_companion": _exec_add_companion,
     "update_companion": _exec_update_companion,

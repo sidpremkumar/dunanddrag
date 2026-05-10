@@ -71,7 +71,11 @@ happened in narration without calling the corresponding tool. This includes:
   - Meeting an NPC, or a meaningful relationship change -> call note_npc
   - Quest given / progressed / completed / failed -> call set_quest
   - Entering or leaving combat -> call set_combat
-  - Resting -> call rest
+  - Resting -> call rest (long rest auto-restores spell slots and ticks +1 day)
+  - Casting a leveled spell (cantrips don't count) -> call change_spell_slots
+    with delta=-1 at the slot level used. Wizards/Clerics ONLY -- the
+    snapshot shows current slots when applicable.
+  - Travel / downtime that passes a day or more -> call advance_time
   - Acquiring or recovering from a condition -> call set_condition
   - Gaining a pet/animal/hireling -> call add_companion
   - A companion taking damage, healing, growing closer or more wary,
@@ -160,10 +164,25 @@ gained is a great fit.
 
 # Memory and continuity
 - The state snapshot below is rebuilt every turn from authoritative data.
-- The "RECENT JOURNAL ENTRIES" section is your long-term memory across
-  many turns. Write a short journal entry whenever something meaningful
-  happens (key NPC met, quest progressed, scene ended, secret learned).
-  Aim for ~1 journal entry per scene, not per turn.
+- Older message history rolls off the context window after ~15 turns;
+  ONLY journal entries persist beyond that. Under-journaling means
+  permanent memory loss for the campaign. Treat the journal tool as
+  obligatory, not optional.
+- You MUST write a short journal entry (1-2 sentences, via the `journal`
+  tool) when ANY of these occur on a turn:
+    * The player enters a NAMED place for the first time (or returns
+      after long absence)
+    * The player meets a NAMED NPC for the first time
+    * An NPC's relationship to the player shifts meaningfully
+    * A quest starts, hits a major beat, completes, or fails
+    * The player gains, loses, or loses-the-trust-of a companion
+    * The player learns a secret, a piece of lore, or a clue
+    * The player acquires a notable item (magical, plot-relevant, valuable)
+    * A combat encounter ends -- record the outcome briefly
+    * A scene ends, a day passes, or significant time is skipped
+  Write as if your future self has amnesia about everything except the
+  bullets you record. One entry per scene is the floor; never per-turn
+  spam, never zero-when-something-real-happened.
 - The "KNOWN NPCS" section is your dossier. Update it via note_npc whenever
   a new NPC is introduced or an existing one's relationship changes.
 - Stay consistent: an NPC's voice, an established fact, a promise made,
@@ -240,15 +259,21 @@ class DungeonMaster:
 
     def _converse_stream(self, state: GameState, with_tools: bool = True, system_suffix: str = ""):
         """Single Bedrock ConverseStream call. Returns the boto3 response.
-        The caller is responsible for consuming `response['stream']`."""
+        The caller is responsible for consuming `response['stream']`.
+
+        Note: `toolConfig` is ALWAYS sent. Bedrock rejects requests whose
+        message history contains toolUse/toolResult blocks but no toolConfig
+        -- and any non-trivial turn's history will. The `with_tools` flag
+        is preserved for callers but is effectively just a hint; tool
+        suppression is done via the system prompt override, and any rogue
+        toolUse blocks the model emits are stripped by the caller."""
         kwargs = dict(
             modelId=self.model_id,
             messages=state.messages,
             system=[{"text": build_system_prompt(state) + system_suffix}],
             inferenceConfig={"maxTokens": 4096, "temperature": 0.85},
+            toolConfig={"tools": TOOL_SCHEMAS},
         )
-        if with_tools:
-            kwargs["toolConfig"] = {"tools": TOOL_SCHEMAS}
         return self.client.converse_stream(**kwargs)
 
     def _consume_stream(self, response) -> tuple[dict, str | None]:
@@ -326,6 +351,17 @@ class DungeonMaster:
                 }})
         return {"role": "assistant", "content": content}, stop_reason
 
+    @staticmethod
+    def _strip_tool_use(msg: dict) -> dict:
+        """Drop toolUse content blocks from an assistant message. Used after
+        no-tools calls (/ask, iteration-cap fallback) where we told the model
+        not to call tools. If it disobeys, an unpaired toolUse block in the
+        saved history would cause Bedrock to reject the NEXT turn."""
+        content = [b for b in msg.get("content", []) if "toolUse" not in b]
+        if not content:
+            content = [{"text": ""}]
+        return {"role": msg.get("role", "assistant"), "content": content}
+
     def take_turn(self, state: GameState, user_text: str) -> None:
         """Run one player turn end-to-end, including any DM tool loops.
 
@@ -369,25 +405,25 @@ class DungeonMaster:
                     })
                 state.messages.append({"role": "user", "content": tool_results})
             else:
-                # Hit the iteration cap. The history at this point ends with a
-                # `user` message of toolResult blocks. We need to coax one more
-                # assistant text response WITHOUT triggering more tool calls,
-                # otherwise the next take_turn would append a `user` after
-                # `user` and Bedrock would reject. Do that by calling Converse
-                # with no toolConfig at all (the model literally cannot emit
-                # tool_use blocks) plus a system override saying so.
+                # Hit the iteration cap. History ends with a `user` message of
+                # toolResult blocks, so we MUST send one more call to get a
+                # final assistant text -- otherwise the next take_turn appends
+                # a `user` after `user` and Bedrock rejects. Send with
+                # toolConfig (required: history has tool blocks) but instruct
+                # the model NOT to call any more tools, and strip any rogue
+                # toolUse it emits anyway so the next turn validates.
                 ui.warn("DM hit the tool-use safety cap. Forcing a closing narration.")
                 response = self._converse_stream(
                     state,
                     with_tools=False,
                     system_suffix=(
                         "\n\n# OVERRIDE\nYou have used your tool budget for this turn. "
-                        "Do NOT plan further tool calls. Write a brief closing "
+                        "Do NOT call any more tools. Write a brief closing "
                         "narration (1-2 paragraphs) that wraps the scene, and stop."
                     ),
                 )
                 msg, _ = self._consume_stream(response)
-                state.messages.append(msg)
+                state.messages.append(self._strip_tool_use(msg))
         except Exception:
             # Roll back anything we added this turn so resume works cleanly.
             del state.messages[baseline_len:]
@@ -414,7 +450,8 @@ class DungeonMaster:
             "not in-character speech). Answer them directly as the DM/guide.\n"
             "- 1-3 short sentences. No flowery language.\n"
             "- DO NOT advance the scene, DO NOT have NPCs react, DO NOT pass time.\n"
-            "- DO NOT call any tools (none are available this turn anyway).\n"
+            "- DO NOT call ANY tools this turn -- no roll_dice, no note_npc,\n"
+            "  no show_art, nothing. This is a pure text reply.\n"
             "- Plainly say if something is not possible in this campaign / world. "
             "  When you can, point at the closest in-world option (a person, a "
             "  place, a quest hook) without committing the player to it.\n"
@@ -425,7 +462,9 @@ class DungeonMaster:
         try:
             response = self._converse_stream(state, with_tools=False, system_suffix=meta_override)
             msg, _ = self._consume_stream(response)
-            state.messages.append(msg)
+            # Strip any rogue toolUse: if the model defied the instruction,
+            # an unpaired toolUse would wedge the next take_turn.
+            state.messages.append(self._strip_tool_use(msg))
         except Exception:
             del state.messages[baseline_len:]
             raise
