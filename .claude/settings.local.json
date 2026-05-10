@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -m py_compile dice.py world.py ui.py character.py state.py tools.py dm.py game.py)"
+      "Bash(python3 -m py_compile dice.py world.py ui.py character.py state.py tools.py dm.py game.py)",
+      "Bash(pip install *)",
+      "Bash(python3 *)",
+      "Bash(git check-ignore *)",
+      "Bash(python verify.py)"
     ]
   }
 }

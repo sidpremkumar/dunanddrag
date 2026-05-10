@@ -269,6 +269,29 @@ TOOL_SCHEMAS = [
             }},
         }
     },
+    {
+        "toolSpec": {
+            "name": "show_art",
+            "description": (
+                "Render a multi-line ASCII art picture in a framed panel for the player. "
+                "Use sparingly for atmosphere -- when the player first arrives at a notable "
+                "location (a town's silhouette, a dungeon entrance, the dragon's mountain), "
+                "when they meet a memorable character (portrait), or when they obtain a "
+                "notable magic item. Do NOT use it every turn. The art should be hand-drawn "
+                "ASCII (use only printable chars, max ~70 columns wide, ~12 rows tall). "
+                "Don't include color codes; the renderer adds color."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "properties": {
+                    "art": {"type": "string", "description": "Multi-line ASCII art. Use \\n between rows."},
+                    "caption": {"type": "string", "description": "Optional short caption shown beneath the art."},
+                    "subject": {"type": "string", "description": "Brief tag of what is depicted (location/npc/item name). Used for logging."},
+                },
+                "required": ["art"],
+            }},
+        }
+    },
 ]
 
 
@@ -387,16 +410,22 @@ def _exec_remove_item(state: GameState, args: dict) -> str:
     if not existing:
         return f"Player does not have any {name}."
     held = existing.get("quantity", 1)
+    unequipped_slots: list[str] = []
     if qty >= held:
         state.player.inventory.remove(existing)
         for slot, n in list(state.player.equipped.items()):
             if n.lower() == name.lower():
                 del state.player.equipped[slot]
+                unequipped_slots.append(slot)
         msg = f"Removed all {held}x {name}."
     else:
         existing["quantity"] = held - qty
         msg = f"Removed {qty}x {name} (remaining {existing['quantity']})."
     ui.event("ITEM-", f"{msg} ({args.get('reason', '')})")
+    # If we just unequipped armor/shield, AC needs to recalculate.
+    if unequipped_slots:
+        _recompute_ac(state)
+        msg += f" Unequipped from {', '.join(unequipped_slots)}; AC is now {state.player.ac}."
     return msg
 
 
@@ -519,6 +548,16 @@ def _exec_rest(state: GameState, args: dict) -> str:
         return f"Player took a short rest. Healed {p.hp - before} HP. HP {p.hp}/{p.max_hp}."
 
 
+def _exec_show_art(state: GameState, args: dict) -> str:
+    art_text = args.get("art", "")
+    if not art_text or not art_text.strip():
+        return "ERROR: empty art."
+    caption = args.get("caption", "") or ""
+    subject = args.get("subject", "") or "scene"
+    ui.art_block(art_text, caption=caption)
+    return f"Rendered ASCII art for: {subject}."
+
+
 def _exec_set_condition(state: GameState, args: dict) -> str:
     cond = args["condition"].lower()
     active = bool(args["active"])
@@ -549,6 +588,7 @@ EXECUTORS: dict[str, Callable[[GameState, dict], str]] = {
     "journal": _exec_journal,
     "rest": _exec_rest,
     "set_condition": _exec_set_condition,
+    "show_art": _exec_show_art,
 }
 
 

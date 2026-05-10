@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+import art
 import dice
 import ui
+
+
+def _check_quit(raw: str) -> None:
+    if raw.strip().lower() in ("/quit", "/exit", "quit", "exit"):
+        ui.system("Aborted.")
+        sys.exit(0)
 
 
 # --- Race / class data ----------------------------------------------------
@@ -167,18 +175,24 @@ class Character:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Character":
+        # Defensive: ensure all six ability scores exist so stat_mod() never
+        # KeyErrors on a partial / older save.
+        stats = {"STR": 10, "DEX": 10, "CON": 10, "INT": 10, "WIS": 10, "CHA": 10}
+        for k, v in (d.get("stats") or {}).items():
+            if k in stats:
+                stats[k] = int(v)
         return cls(
             name=d["name"],
-            race=d["race"],
-            char_class=d["char_class"],
-            background=d["background"],
-            level=d.get("level", 1),
-            xp=d.get("xp", 0),
-            hp=d.get("hp", 10),
-            max_hp=d.get("max_hp", 10),
-            ac=d.get("ac", 10),
-            gold=d.get("gold", 25),
-            stats=dict(d.get("stats", {})),
+            race=d.get("race", "Human"),
+            char_class=d.get("char_class", "Fighter"),
+            background=d.get("background", ""),
+            level=int(d.get("level", 1)),
+            xp=int(d.get("xp", 0)),
+            hp=int(d.get("hp", 10)),
+            max_hp=int(d.get("max_hp", 10)),
+            ac=int(d.get("ac", 10)),
+            gold=int(d.get("gold", 25)),
+            stats=stats,
             inventory=list(d.get("inventory", [])),
             equipped=dict(d.get("equipped", {})),
             conditions=list(d.get("conditions", [])),
@@ -188,19 +202,40 @@ class Character:
 # --- Creation flow --------------------------------------------------------
 
 
-def _ask_choice(prompt: str, options: dict[str, dict], detail_key: str = "blurb") -> str:
+def _ask_choice(prompt: str, options: dict[str, dict], detail_key: str = "blurb",
+                sigils: dict[str, str] | None = None) -> str:
+    """Pick one option from a dict. If `sigils` is provided, render each
+    option's ASCII sigil to the left of its blurb."""
     keys = list(options.keys())
     while True:
         print()
         for i, k in enumerate(keys, 1):
-            print(f"  {i}. {k} -- {options[k][detail_key]}")
+            blurb = options[k][detail_key]
+            if sigils and k in sigils:
+                sig_lines = sigils[k].split("\n")
+                # Render sigil + name + blurb side-by-side
+                num_label = f"  {i}. "
+                pad = " " * len(num_label)
+                # sigil width (visual width is approximate)
+                for j, sl in enumerate(sig_lines):
+                    if j == 0:
+                        line = num_label + sl + "   " + ui._c(ui.C.BOLD + ui.C.BRIGHT_CYAN, k)
+                    elif j == 1:
+                        line = pad + sl + "   " + blurb
+                    else:
+                        line = pad + sl
+                    print(line)
+                print()
+            else:
+                print(f"  {i}. {ui._c(ui.C.BOLD + ui.C.BRIGHT_CYAN, k)}  --  {blurb}")
         raw = ui.prompt(prompt).strip()
+        _check_quit(raw)
         if raw.isdigit() and 1 <= int(raw) <= len(keys):
             return keys[int(raw) - 1]
         for k in keys:
             if k.lower() == raw.lower():
                 return k
-        ui.warn("Pick one by number or name.")
+        ui.warn("Pick one by number or name. (/quit to abort)")
 
 
 def _roll_stats() -> list[int]:
@@ -217,6 +252,7 @@ def _assign_stats(rolls: list[int]) -> dict:
         while True:
             print(f"  Remaining: {remaining}")
             raw = ui.prompt(f"  Value for {s}: ").strip()
+            _check_quit(raw)
             if not raw.isdigit():
                 ui.warn("Enter a number from the remaining pool.")
                 continue
@@ -232,10 +268,12 @@ def _assign_stats(rolls: list[int]) -> dict:
 
 def create_character() -> Character:
     ui.banner("Character Creation", "Roll a hero to face Vorthrax")
+    ui.system("(type /quit at any prompt to abort)")
 
     # Name
     while True:
         name = ui.prompt("Name your hero: ").strip()
+        _check_quit(name)
         if name:
             break
         ui.warn("Give them a name.")
@@ -246,14 +284,16 @@ def create_character() -> Character:
 
     # Class
     ui.section("Class")
-    char_class = _ask_choice("Pick a class (number or name): ", CLASSES)
+    char_class = _ask_choice("Pick a class (number or name): ", CLASSES, sigils=art.CLASS_SIGILS)
 
     # Stats
     ui.section("Ability Scores")
     ui.system("Rolling 4d6 drop lowest, six times. You may reroll the set once.")
     rolls = _roll_stats()
     print(f"  Rolls: {rolls}  (sum {sum(rolls)})")
-    if ui.prompt("Reroll? [y/N] ").strip().lower() == "y":
+    reroll = ui.prompt("Reroll? [y/N] ").strip()
+    _check_quit(reroll)
+    if reroll.lower() == "y":
         rolls = _roll_stats()
         print(f"  New rolls: {rolls}  (sum {sum(rolls)})")
     stats = _assign_stats(rolls)
@@ -266,6 +306,7 @@ def create_character() -> Character:
     ui.system("Tell the DM who this character is. A sentence or two on backstory,\n"
               "personality, why they came to Stonehaven. The DM will use this.")
     background = ui.prompt("Background: ").strip()
+    _check_quit(background)
     if not background:
         background = f"A {race.lower()} {char_class.lower()} drawn to Ashvale by the dragon-slayer bounty."
 
@@ -313,20 +354,27 @@ def create_character() -> Character:
 
 
 def print_sheet(char: Character) -> None:
-    print()
-    print(f"  {char.name} -- {char.race} {char.char_class}, level {char.level}")
-    print(f"  HP {char.hp}/{char.max_hp}   AC {char.ac}   XP {char.xp} (next: {xp_to_next(char.xp)})   Gold {char.gold}")
-    mods = "  ".join(f"{s} {char.stats[s]:>2} ({char.stat_mod(s):+d})" for s in ["STR","DEX","CON","INT","WIS","CHA"])
-    print(f"  {mods}")
-    print(f"  Proficiency +{char.proficiency()}")
+    """Pretty character sheet using the boxed UI."""
+    lines: list[str] = []
+    lines.append(f"{char.name}  --  {char.race} {char.char_class}, level {char.level}")
+    lines.append("")
+    lines.append(f"HP   {char.hp}/{char.max_hp}    AC   {char.ac}    XP   {char.xp}  (next: {xp_to_next(char.xp)})    Gold   {char.gold}")
+    lines.append(f"Proficiency  +{char.proficiency()}")
+    lines.append("")
+    lines.append("ABILITY SCORES")
+    for s in ["STR", "DEX", "CON", "INT", "WIS", "CHA"]:
+        lines.append(f"  {s}  {char.stats[s]:>2}  ({char.stat_mod(s):+d})")
     if char.conditions:
-        print(f"  Conditions: {', '.join(char.conditions)}")
-    print(f"  Background: {char.background}")
+        lines.append("")
+        lines.append("CONDITIONS  " + ", ".join(char.conditions))
     if char.equipped:
-        eq = ", ".join(f"{slot}: {name}" for slot, name in char.equipped.items())
-        print(f"  Equipped: {eq}")
-    if char.inventory:
-        print("  Inventory:")
-        for it in char.inventory:
-            qty = f" x{it['quantity']}" if it.get("quantity", 1) > 1 else ""
-            print(f"    - {it['name']}{qty} -- {it['description']}")
+        lines.append("")
+        lines.append("EQUIPPED")
+        for slot, name in char.equipped.items():
+            lines.append(f"  {slot:<10} {name}")
+    if char.background:
+        lines.append("")
+        lines.append("BACKGROUND")
+        # Wrap background separately so the box framing still works.
+        lines.append(f"  {char.background}")
+    ui.boxed("Character Sheet", lines)

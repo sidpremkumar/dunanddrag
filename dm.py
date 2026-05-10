@@ -25,11 +25,14 @@ from tools import TOOL_SCHEMAS, dispatch
 from world import WORLD_BIBLE, CAMPAIGN_TITLE
 
 
+# The bare `anthropic.claude-opus-4-5-...` ID rejects on-demand calls --
+# Bedrock requires the `us.` (or other regional) inference-profile prefix.
 DEFAULT_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID",
-    "us.anthropic.claude-opus-4-5-20250929-v1:0",
+    "us.anthropic.claude-opus-4-5-20251101-v1:0",
 )
-DEFAULT_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
+DEFAULT_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+DEFAULT_PROFILE = os.environ.get("AWS_PROFILE")
 
 
 SYSTEM_PROMPT_PREFIX = f"""\
@@ -60,6 +63,21 @@ happened in narration without calling the corresponding tool. This includes:
   - Acquiring or recovering from a condition -> call set_condition
 
 You may chain multiple tools in one turn if a scene calls for it.
+
+# Atmosphere: ASCII art (sparingly)
+You have a `show_art` tool that renders a framed ASCII picture for the
+player. Use it for *memorable* moments only -- never every turn.
+Good times to use it:
+  - First arrival at a notable place (a town silhouette from the road,
+    a dungeon's gates, the smoking peak of Mt. Kaeloth).
+  - Meeting a key NPC for the first time (a small portrait or sigil).
+  - Acquiring a notable magic item (a sketch of the item).
+  - A climactic reveal (the dragon's eye, a glowing artifact).
+Constraints:
+  - Use only printable ASCII / common box-drawing chars.
+  - Max ~70 columns wide and ~12 rows tall.
+  - Hand-draw it inline; do not embed color codes.
+  - One art block per turn at most. Skip entirely if nothing warrants it.
 
 # Dice and DCs (D&D-lite)
 - Easy DC 10, Medium DC 15, Hard DC 20, Very Hard DC 25.
@@ -128,70 +146,113 @@ def build_system_prompt(state: GameState) -> str:
 
 
 class DungeonMaster:
-    def __init__(self, model_id: str | None = None, region: str | None = None):
+    def __init__(self, model_id: str | None = None, region: str | None = None, profile: str | None = None):
         self.model_id = model_id or DEFAULT_MODEL_ID
         self.region = region or DEFAULT_REGION
+        self.profile = profile or DEFAULT_PROFILE
         cfg = Config(read_timeout=180, connect_timeout=10, retries={"max_attempts": 3})
-        self.client = boto3.client("bedrock-runtime", region_name=self.region, config=cfg)
+        session = boto3.Session(profile_name=self.profile) if self.profile else boto3.Session()
+        self.client = session.client("bedrock-runtime", region_name=self.region, config=cfg)
+
+    def _converse(self, state: GameState, with_tools: bool = True, system_suffix: str = ""):
+        """Single Bedrock Converse call. Isolated so it's mockable in tests."""
+        kwargs = dict(
+            modelId=self.model_id,
+            messages=state.messages,
+            system=[{"text": build_system_prompt(state) + system_suffix}],
+            inferenceConfig={"maxTokens": 4096, "temperature": 0.85},
+        )
+        if with_tools:
+            kwargs["toolConfig"] = {"tools": TOOL_SCHEMAS}
+        return self.client.converse(**kwargs)
 
     def take_turn(self, state: GameState, user_text: str) -> None:
-        """Run one player turn end-to-end, including any DM tool loops."""
+        """Run one player turn end-to-end, including any DM tool loops.
+
+        On any error during the model call, rolls back any messages added
+        in this turn so the saved history stays in clean alternation and
+        resume keeps working.
+        """
+        baseline_len = len(state.messages)
         state.turn += 1
         state.messages.append({"role": "user", "content": [{"text": user_text}]})
 
-        max_iters = 12  # safety net against tool loops
-        for _ in range(max_iters):
-            response = self.client.converse(
-                modelId=self.model_id,
-                messages=state.messages,
-                system=[{"text": build_system_prompt(state)}],
-                toolConfig={"tools": TOOL_SCHEMAS},
-                inferenceConfig={"maxTokens": 4096, "temperature": 0.85},
-            )
-            msg = response["output"]["message"]
-            state.messages.append(msg)
+        max_iters = 12  # safety net against runaway tool loops
+        try:
+            for _ in range(max_iters):
+                response = self._converse(state)
+                msg = response["output"]["message"]
+                state.messages.append(msg)
 
-            # Print any narration text
-            for block in msg["content"]:
-                if "text" in block and block["text"].strip():
-                    ui.dm(block["text"])
+                # Print any narration text
+                for block in msg["content"]:
+                    if "text" in block and block["text"].strip():
+                        ui.dm(block["text"])
 
-            stop_reason = response.get("stopReason")
-            if stop_reason != "tool_use":
-                break
+                stop_reason = response.get("stopReason")
+                if stop_reason != "tool_use":
+                    break
 
-            # Execute tool calls and feed results back
-            tool_results = []
-            for block in msg["content"]:
-                if "toolUse" not in block:
-                    continue
-                tu = block["toolUse"]
-                result_text, ok = dispatch(state, tu["name"], tu.get("input", {}))
-                tool_results.append({
-                    "toolResult": {
-                        "toolUseId": tu["toolUseId"],
-                        "content": [{"text": result_text}],
-                        "status": "success" if ok else "error",
-                    }
-                })
-            state.messages.append({"role": "user", "content": tool_results})
-        else:
-            ui.warn("DM stopped after hitting the tool-use safety limit. Continuing.")
+                # Execute tool calls and feed results back
+                tool_results = []
+                for block in msg["content"]:
+                    if "toolUse" not in block:
+                        continue
+                    tu = block["toolUse"]
+                    result_text, ok = dispatch(state, tu["name"], tu.get("input", {}))
+                    tool_results.append({
+                        "toolResult": {
+                            "toolUseId": tu["toolUseId"],
+                            "content": [{"text": result_text}],
+                            "status": "success" if ok else "error",
+                        }
+                    })
+                state.messages.append({"role": "user", "content": tool_results})
+            else:
+                # Hit the iteration cap. The history at this point ends with a
+                # `user` message of toolResult blocks. We need to coax one more
+                # assistant text response WITHOUT triggering more tool calls,
+                # otherwise the next take_turn would append a `user` after
+                # `user` and Bedrock would reject. Do that by calling Converse
+                # with no toolConfig at all (the model literally cannot emit
+                # tool_use blocks) plus a system override saying so.
+                ui.warn("DM hit the tool-use safety cap. Forcing a closing narration.")
+                response = self._converse(
+                    state,
+                    with_tools=False,
+                    system_suffix=(
+                        "\n\n# OVERRIDE\nYou have used your tool budget for this turn. "
+                        "Do NOT plan further tool calls. Write a brief closing "
+                        "narration (1-2 paragraphs) that wraps the scene, and stop."
+                    ),
+                )
+                msg = response["output"]["message"]
+                state.messages.append(msg)
+                for block in msg["content"]:
+                    if "text" in block and block["text"].strip():
+                        ui.dm(block["text"])
+        except Exception:
+            # Roll back anything we added this turn so resume works cleanly.
+            del state.messages[baseline_len:]
+            state.turn -= 1
+            raise
 
     def opening_scene(self, state: GameState, opening_text: str) -> None:
-        """Kick off the campaign. We seed the conversation with the hardcoded
-        opening, then ask the model to take it from there as DM."""
+        """Kick off the campaign by handing the DM the hardcoded opening
+        as a system-style seed message. The DM picks up from there."""
         # Print the hardcoded scene so the player sees a consistent start.
         ui.dm(opening_text)
-        # Tell the DM to pick up from there. The model will likely write a
-        # follow-up sentence and prompt for action -- and importantly, it'll
-        # see the full state snapshot and world bible.
+        # Embed the opening text so the DM knows EXACTLY what was just shown
+        # to the player, and can follow up consistently.
         seed = (
             "[GAME START]\n\n"
-            "The opening scene above has just been narrated to the player. "
-            "Take it from here as DM: voice the inn briefly (sights, sounds, "
-            "anyone present), then prompt the player for what they do. "
-            "Call note_npc for any NPC you introduce. Keep it tight -- 2 "
-            "short paragraphs."
+            "The following opening scene has just been narrated to the player. "
+            "Continue from here as DM. Voice the inn briefly (sights, sounds, "
+            "anyone present), and prompt the player for their first action. "
+            "Call note_npc for any NPC you introduce. Keep the response to "
+            "2 short paragraphs.\n\n"
+            "----- OPENING SCENE -----\n"
+            f"{opening_text.strip()}\n"
+            "----- END OPENING SCENE -----"
         )
         self.take_turn(state, seed)

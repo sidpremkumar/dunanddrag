@@ -1,0 +1,22 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Atomic-save temp files (state.py writes save.json.tmp then renames)
+*.json.tmp
+
+# IMPORTANT: save.json is intentionally NOT ignored.
+# It holds your campaign progress and is meant to be committed so you
+# can resume from another machine. Same for any --save <name>.json.

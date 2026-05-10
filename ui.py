@@ -1,4 +1,19 @@
-"""Tiny terminal UI helpers. ANSI colors, status line, banners."""
+"""Terminal UI helpers: colors, boxes, banners, status line, art rendering.
+
+Behavior summary:
+  - banner(title, subtitle): big bordered title block.
+  - section(title): a thin labeled rule.
+  - boxed(title, lines): a full bordered box for inventory / journal / etc.
+  - dm(text): word-wrapped DM narration with a subtle left vertical bar.
+  - art_block(art, caption): render ASCII art verbatim inside a frame.
+  - status_line(player, location): one-line HUD with HP bar and stats.
+  - event(label, text), roll(...): colored in-game event lines.
+  - prompt(prefix): readline prompt with color hint.
+
+NO_COLOR=1 disables color escapes and switches to plain ASCII frames.
+"""
+
+from __future__ import annotations
 
 import os
 import shutil
@@ -6,12 +21,17 @@ import sys
 import textwrap
 
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+_USE_UNICODE = os.environ.get("ASCII_ONLY") is None
+
+
+# --- Colors ---------------------------------------------------------------
 
 
 class C:
     RESET = "\033[0m"
     DIM = "\033[2m"
     BOLD = "\033[1m"
+    ITALIC = "\033[3m"
     RED = "\033[31m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
@@ -23,7 +43,10 @@ class C:
     BRIGHT_RED = "\033[91m"
     BRIGHT_GREEN = "\033[92m"
     BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
     BRIGHT_CYAN = "\033[96m"
+    BRIGHT_WHITE = "\033[97m"
 
 
 def _c(code: str, text: str) -> str:
@@ -32,48 +55,234 @@ def _c(code: str, text: str) -> str:
     return f"{code}{text}{C.RESET}"
 
 
+# --- Box-drawing characters ----------------------------------------------
+
+
+class B:
+    """Box-drawing chars. Falls back to ASCII when ASCII_ONLY is set."""
+
+    if _USE_UNICODE:
+        H = "─"
+        V = "│"
+        TL = "╭"
+        TR = "╮"
+        BL = "╰"
+        BR = "╯"
+        TEE_L = "├"
+        TEE_R = "┤"
+        BOLD_H = "═"
+        BOLD_V = "║"
+        BOLD_TL = "╔"
+        BOLD_TR = "╗"
+        BOLD_BL = "╚"
+        BOLD_BR = "╝"
+        BAR_FULL = "█"
+        BAR_EMPTY = "░"
+        BULLET = "•"
+        ARROW = "→"
+    else:
+        H = "-"
+        V = "|"
+        TL = "+"
+        TR = "+"
+        BL = "+"
+        BR = "+"
+        TEE_L = "+"
+        TEE_R = "+"
+        BOLD_H = "="
+        BOLD_V = "|"
+        BOLD_TL = "+"
+        BOLD_TR = "+"
+        BOLD_BL = "+"
+        BOLD_BR = "+"
+        BAR_FULL = "#"
+        BAR_EMPTY = "."
+        BULLET = "*"
+        ARROW = "->"
+
+
+# --- Width / layout ------------------------------------------------------
+
+
+_MIN_WIDTH = 60
+_MAX_WIDTH = 100
+
+
 def width() -> int:
     try:
-        return min(shutil.get_terminal_size((100, 24)).columns, 100)
+        cols = shutil.get_terminal_size((100, 24)).columns
     except Exception:
-        return 80
+        cols = 80
+    return max(_MIN_WIDTH, min(_MAX_WIDTH, cols))
 
 
 def hr(char: str = "-") -> str:
     return char * width()
 
 
+# --- Banner / sections ---------------------------------------------------
+
+
 def banner(title: str, subtitle: str = "") -> None:
     w = width()
-    bar = "=" * w
-    print(_c(C.BRIGHT_CYAN, bar))
-    print(_c(C.BRIGHT_CYAN + C.BOLD, title.center(w)))
+    inner = w - 4  # for the two-char border on each side
+    bar_top = B.BOLD_TL + B.BOLD_H * (w - 2) + B.BOLD_TR
+    bar_bot = B.BOLD_BL + B.BOLD_H * (w - 2) + B.BOLD_BR
+    blank = B.BOLD_V + " " * (w - 2) + B.BOLD_V
+
+    print()
+    print(_c(C.BRIGHT_RED + C.BOLD, bar_top))
+    print(_c(C.BRIGHT_RED, blank))
+    title_line = title.center(inner)
+    print(_c(C.BRIGHT_RED, B.BOLD_V + " ") + _c(C.BRIGHT_YELLOW + C.BOLD, title_line) + _c(C.BRIGHT_RED, " " + B.BOLD_V))
     if subtitle:
-        print(_c(C.CYAN, subtitle.center(w)))
-    print(_c(C.BRIGHT_CYAN, bar))
+        sub_line = subtitle.center(inner)
+        print(_c(C.BRIGHT_RED, B.BOLD_V + " ") + _c(C.YELLOW, sub_line) + _c(C.BRIGHT_RED, " " + B.BOLD_V))
+    print(_c(C.BRIGHT_RED, blank))
+    print(_c(C.BRIGHT_RED + C.BOLD, bar_bot))
+    print()
+
+
+def title_screen(art: str, banner_block: str) -> None:
+    """Print the multi-line title art followed by the banner block.
+
+    Both args are raw multi-line strings (e.g. from art.py).
+    """
+    print()
+    for line in art.rstrip("\n").split("\n"):
+        print(_c(C.BRIGHT_RED, line))
+    for line in banner_block.rstrip("\n").split("\n"):
+        print(_c(C.BRIGHT_YELLOW + C.BOLD, line))
+    print()
 
 
 def section(title: str) -> None:
+    """A thin labeled rule used between groups. Quieter than `banner`."""
+    w = width()
+    label = f" {title} "
+    rule = B.H * max(0, w - len(label) - 4)
     print()
-    print(_c(C.BOLD + C.CYAN, f"-- {title} " + "-" * max(0, width() - len(title) - 4)))
+    print(
+        _c(C.CYAN + C.BOLD, B.TEE_L + B.H + B.H)
+        + _c(C.BRIGHT_CYAN + C.BOLD, label)
+        + _c(C.CYAN + C.BOLD, rule + B.TEE_R)
+    )
+
+
+def boxed(title: str, lines: list[str], color: str = C.CYAN) -> None:
+    """Render a list of plain lines inside a titled box. Wraps long lines."""
+    w = width()
+    inner = w - 4  # space for `│ ` and ` │`
+    title_label = f" {title} "
+    top = B.TL + B.H + title_label + B.H * max(0, w - 4 - len(title_label)) + B.TR
+    bot = B.BL + B.H * (w - 2) + B.BR
+    print()
+    print(_c(color + C.BOLD, top))
+    for raw in lines:
+        # Split on newlines first so the caller can produce blank rows.
+        for sub in raw.split("\n"):
+            if not sub:
+                print(_c(color, B.V) + " " * (w - 2) + _c(color, B.V))
+                continue
+            # Wrap to inner width.
+            wrapped = textwrap.wrap(sub, width=inner) or [""]
+            for piece in wrapped:
+                pad = inner - _visible_len(piece)
+                print(
+                    _c(color, B.V) + " "
+                    + piece + " " * pad
+                    + " " + _c(color, B.V)
+                )
+    print(_c(color + C.BOLD, bot))
+
+
+def art_block(art: str, caption: str = "", color: str = C.BRIGHT_MAGENTA) -> None:
+    """Render verbatim ASCII art inside a soft frame. Does not word-wrap."""
+    art = art.rstrip("\n").lstrip("\n")
+    if not art:
+        return
+    w = width()
+    art_lines = art.split("\n")
+    art_w = max(_visible_len(l) for l in art_lines)
+    box_w = min(w, art_w + 4)
+    inner = box_w - 4
+    top = B.TL + B.H * (box_w - 2) + B.TR
+    bot = B.BL + B.H * (box_w - 2) + B.BR
+    print()
+    print(_c(color, top))
+    for line in art_lines:
+        # Truncate or pad to fit.
+        visible = line if _visible_len(line) <= inner else line[:inner]
+        pad = inner - _visible_len(visible)
+        print(_c(color, B.V) + " " + visible + " " * pad + " " + _c(color, B.V))
+    if caption:
+        print(_c(color, B.V) + " " + " " * inner + " " + _c(color, B.V))
+        cap_lines = textwrap.wrap(caption, width=inner) or [caption]
+        for cl in cap_lines:
+            pad = inner - _visible_len(cl)
+            print(_c(color, B.V) + " " + _c(C.ITALIC + color, cl) + " " * pad + " " + _c(color, B.V))
+    print(_c(color, bot))
+
+
+# --- DM narration --------------------------------------------------------
 
 
 def dm(text: str) -> None:
-    """Print DM narration with subtle wrapping and color."""
+    """Word-wrapped DM narration, indented with a subtle left bar."""
+    w = width()
+    inner = w - 4  # 2 for bar + space, 2 right margin
+
     print()
-    for paragraph in text.strip().split("\n\n"):
-        wrapped = textwrap.fill(
-            paragraph.strip(),
-            width=width(),
-            replace_whitespace=False,
-            drop_whitespace=True,
-        )
-        print(_c(C.WHITE, wrapped))
-        print()
+    paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
+    for i, paragraph in enumerate(paragraphs):
+        # Collapse internal whitespace then wrap.
+        flat = " ".join(paragraph.split())
+        wrapped = textwrap.wrap(flat, width=inner) or [""]
+        for line in wrapped:
+            print(_c(C.BRIGHT_MAGENTA + C.DIM, B.V) + "  " + _c(C.BRIGHT_WHITE, line))
+        if i < len(paragraphs) - 1:
+            print(_c(C.BRIGHT_MAGENTA + C.DIM, B.V))
+    print()
+
+
+# --- Status line ---------------------------------------------------------
+
+
+def status_line(player, location: str) -> None:
+    bar_w = 14
+    hp = max(0, player.hp)
+    max_hp = max(1, player.max_hp)
+    ratio = hp / max_hp
+    filled = max(0, min(bar_w, int(round(bar_w * ratio))))
+    bar = B.BAR_FULL * filled + B.BAR_EMPTY * (bar_w - filled)
+
+    if ratio > 0.6:
+        bar_c = C.BRIGHT_GREEN
+    elif ratio > 0.3:
+        bar_c = C.YELLOW
+    else:
+        bar_c = C.BRIGHT_RED
+
+    sep = _c(C.GREY, "  " + B.V + "  ")
+    parts = [
+        _c(C.BOLD + C.BRIGHT_WHITE, player.name)
+        + " "
+        + _c(C.GREY, f"({player.race} {player.char_class} L{player.level})"),
+        _c(C.GREY, "HP ") + _c(bar_c, bar) + _c(C.WHITE, f" {hp}/{max_hp}"),
+        _c(C.GREY, "AC ") + _c(C.WHITE, str(player.ac)),
+        _c(C.GREY, "XP ") + _c(C.WHITE, str(player.xp)),
+        _c(C.GREY, "GP ") + _c(C.YELLOW, str(player.gold)),
+        _c(C.GREY, "@ ") + _c(C.BRIGHT_CYAN, location),
+    ]
+    print()
+    print("  " + sep.join(parts))
+
+
+# --- Events / rolls ------------------------------------------------------
 
 
 def system(text: str) -> None:
-    print(_c(C.DIM + C.GREY, text))
+    print(_c(C.GREY + C.DIM, text))
 
 
 def warn(text: str) -> None:
@@ -88,44 +297,54 @@ def success(text: str) -> None:
     print(_c(C.BRIGHT_GREEN, text))
 
 
+# Color hint per event label, so different events read at a glance.
+_EVENT_COLORS: dict[str, str] = {
+    "DAMAGE": C.BRIGHT_RED,
+    "HEAL": C.BRIGHT_GREEN,
+    "DOWN": C.BRIGHT_RED + C.BOLD,
+    "XP": C.BRIGHT_CYAN,
+    "LEVEL UP": C.BRIGHT_YELLOW + C.BOLD,
+    "GOLD": C.YELLOW,
+    "ITEM+": C.BRIGHT_GREEN,
+    "ITEM-": C.GREY,
+    "EQUIP": C.BRIGHT_BLUE,
+    "MOVE": C.BRIGHT_CYAN,
+    "DISCOVERED": C.BRIGHT_MAGENTA + C.BOLD,
+    "NPC": C.BRIGHT_BLUE,
+    "QUEST": C.BRIGHT_YELLOW,
+    "COMBAT": C.BRIGHT_RED + C.BOLD,
+    "REST": C.GREEN,
+    "CONDITION": C.BRIGHT_MAGENTA,
+}
+
+
 def event(label: str, text: str) -> None:
-    """In-game event line, e.g. dice roll or HP change."""
-    print(_c(C.MAGENTA + C.BOLD, f"  [{label}] ") + _c(C.MAGENTA, text))
+    color = _EVENT_COLORS.get(label, C.BRIGHT_MAGENTA)
+    print(
+        "  " + _c(color, B.BULLET + " ")
+        + _c(color + C.BOLD, f"[{label}]")
+        + " " + _c(color, text)
+    )
 
 
 def roll(label: str, total: int, detail: str, dc: int | None = None) -> None:
-    color = C.GREEN
+    color = C.BRIGHT_GREEN
     suffix = ""
     if dc is not None:
         if total >= dc:
-            suffix = _c(C.BRIGHT_GREEN, f"  SUCCESS (DC {dc})")
+            suffix = "  " + _c(C.BRIGHT_GREEN + C.BOLD, f"✓ SUCCESS (DC {dc})") if _USE_UNICODE else "  " + _c(C.BRIGHT_GREEN + C.BOLD, f"SUCCESS (DC {dc})")
         else:
             color = C.YELLOW
-            suffix = _c(C.YELLOW, f"  FAIL (DC {dc})")
-    print(_c(C.MAGENTA, f"  >>") + _c(C.BOLD + color, f" {label}: ") + _c(color, f"{detail} = {total}") + suffix)
-
-
-def status_line(player, location: str) -> None:
-    bar_w = 14
-    hp_ratio = max(0.0, min(1.0, player.hp / max(1, player.max_hp)))
-    filled = int(round(bar_w * hp_ratio))
-    bar = "#" * filled + "." * (bar_w - filled)
-    if hp_ratio > 0.6:
-        bar_c = C.BRIGHT_GREEN
-    elif hp_ratio > 0.3:
-        bar_c = C.YELLOW
-    else:
-        bar_c = C.BRIGHT_RED
-    line = (
-        _c(C.BOLD, f"{player.name} ")
-        + _c(C.GREY, f"({player.race} {player.char_class} L{player.level})")
-        + _c(C.GREY, "  HP ")
-        + _c(bar_c, f"[{bar}] {player.hp}/{player.max_hp}")
-        + _c(C.GREY, f"  AC {player.ac}  XP {player.xp}  GP {player.gold}")
-        + _c(C.CYAN, f"  @ {location}")
+            suffix = "  " + _c(C.YELLOW + C.BOLD, f"✗ FAIL (DC {dc})") if _USE_UNICODE else "  " + _c(C.YELLOW + C.BOLD, f"FAIL (DC {dc})")
+    print(
+        "  " + _c(C.MAGENTA, B.BULLET + " ")
+        + _c(C.BOLD + color, f"[{label}] ")
+        + _c(color, f"{detail} = {total}")
+        + suffix
     )
-    print()
-    print(line)
+
+
+# --- Prompt --------------------------------------------------------------
 
 
 def prompt(prefix: str = "> ") -> str:
@@ -133,3 +352,24 @@ def prompt(prefix: str = "> ") -> str:
         return input(_c(C.BRIGHT_CYAN + C.BOLD, prefix))
     except EOFError:
         return "/quit"
+
+
+# --- helpers -------------------------------------------------------------
+
+
+def _visible_len(s: str) -> int:
+    """Approx length ignoring ANSI escapes. We don't put escapes inside
+    strings passed to box layout (we apply colors AFTER measuring), so this
+    is mostly a safety net."""
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\033" and i + 1 < len(s) and s[i + 1] == "[":
+            j = s.find("m", i)
+            if j == -1:
+                break
+            i = j + 1
+            continue
+        out.append(s[i])
+        i += 1
+    return len("".join(out))

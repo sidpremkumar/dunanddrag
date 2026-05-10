@@ -24,6 +24,7 @@ import sys
 import traceback
 from pathlib import Path
 
+import art
 import character as char_mod
 import ui
 from dm import DungeonMaster
@@ -38,6 +39,7 @@ HELP_TEXT = """\
   /journal     show recent journal entries
   /quests      show quest log
   /map         show discovered locations
+  /recap       reprint the most recent DM narration
   /save        save now (also auto-saves every turn)
   /quit        save and exit
 
@@ -47,53 +49,83 @@ quotes, describe actions, ask questions, etc.
 """
 
 
+def _last_dm_narration(state: GameState) -> str | None:
+    """Return the most recent assistant text content, if any."""
+    for msg in reversed(state.messages):
+        if msg.get("role") != "assistant":
+            continue
+        texts = [b["text"] for b in msg.get("content", []) if "text" in b and b["text"].strip()]
+        if texts:
+            return "\n\n".join(texts)
+    return None
+
+
 def _print_inventory(state: GameState) -> None:
     p = state.player
-    ui.section("Equipped")
+    eq_lines: list[str] = []
     if not p.equipped:
-        print("  (none)")
-    for slot, name in p.equipped.items():
-        print(f"  - {slot}: {name}")
-    ui.section("Inventory")
+        eq_lines.append("(none)")
+    else:
+        for slot, name in p.equipped.items():
+            eq_lines.append(f"{slot:<10} {name}")
+    ui.boxed("Equipped", eq_lines)
+
+    inv_lines: list[str] = []
     if not p.inventory:
-        print("  (empty)")
-    for it in p.inventory:
-        qty = f" x{it['quantity']}" if it.get("quantity", 1) > 1 else ""
-        print(f"  - {it['name']}{qty} -- {it.get('description', '')}")
+        inv_lines.append("(empty)")
+    else:
+        for it in p.inventory:
+            qty = f" x{it['quantity']}" if it.get("quantity", 1) > 1 else ""
+            inv_lines.append(f"• {it['name']}{qty}")
+            desc = it.get("description", "")
+            if desc:
+                inv_lines.append(f"    {desc}")
+    ui.boxed("Inventory", inv_lines)
 
 
 def _print_journal(state: GameState, n: int = 25) -> None:
-    ui.section("Journal")
     if not state.journal:
-        print("  (no entries yet)")
+        ui.boxed("Journal", ["(no entries yet)"])
         return
-    for e in state.journal[-n:]:
-        print(f"  - turn {e['turn']}: {e['text']}")
+    lines = [f"turn {e['turn']:>3}: {e['text']}" for e in state.journal[-n:]]
+    ui.boxed("Journal", lines)
 
 
 def _print_quests(state: GameState) -> None:
-    ui.section("Quests")
     if not state.quests:
-        print("  (no quests yet)")
+        ui.boxed("Quests", ["(no quests yet)"])
         return
+    lines: list[str] = []
     for name, q in state.quests.items():
-        print(f"  - {name} [{q.get('status', 'active')}]: {q.get('description', '')}"
-              + (f"  (reward: {q['reward']})" if q.get("reward") else ""))
+        status = q.get("status", "active")
+        lines.append(f"• {name}  [{status}]")
+        if q.get("description"):
+            lines.append(f"    {q['description']}")
+        if q.get("reward"):
+            lines.append(f"    reward: {q['reward']}")
+    ui.boxed("Quests", lines)
 
 
 def _print_map(state: GameState) -> None:
-    ui.section("World Map")
     discovered = [(n, l) for n, l in state.locations.items() if l.get("discovered")]
     rumored = [(n, l) for n, l in state.locations.items() if not l.get("discovered")]
-    print("  Discovered:")
+    lines: list[str] = []
+    lines.append("DISCOVERED")
     if not discovered:
-        print("    (none)")
+        lines.append("    (none)")
     for n, l in discovered:
-        print(f"    - {n} ({l.get('type', '?')}, {l.get('region', '?')}): {l.get('description', '')}")
+        marker = "✦" if n == state.player_location else "•"
+        lines.append(f"  {marker} {n}  ({l.get('type', '?')}, {l.get('region', '?')})")
+        if l.get("description"):
+            lines.append(f"      {l['description']}")
     if rumored:
-        print("  Rumored:")
+        lines.append("")
+        lines.append("RUMORED")
         for n, l in rumored:
-            print(f"    - {n} ({l.get('region', '?')}): {l.get('description', '')}")
+            lines.append(f"  ◌ {n}  ({l.get('region', '?')})")
+            if l.get("description"):
+                lines.append(f"      {l['description']}")
+    ui.boxed("World Map", lines)
 
 
 def handle_command(cmd: str, state: GameState, save_path: Path) -> bool:
@@ -111,12 +143,24 @@ def handle_command(cmd: str, state: GameState, save_path: Path) -> bool:
         _print_quests(state)
     elif cmd in ("/map", "/locations"):
         _print_map(state)
+    elif cmd in ("/recap", "/last"):
+        last = _last_dm_narration(state)
+        if last:
+            ui.dm(last)
+        else:
+            ui.system("(no narration to recap yet)")
     elif cmd == "/save":
-        state.save(save_path)
-        ui.success(f"Saved to {save_path}.")
+        try:
+            state.save(save_path)
+            ui.success(f"Saved to {save_path}.")
+        except Exception as e:
+            ui.error(f"Save failed: {e}")
     elif cmd in ("/quit", "/exit", "/q!"):
-        state.save(save_path)
-        ui.success(f"Saved to {save_path}. Farewell.")
+        try:
+            state.save(save_path)
+            ui.success(f"Saved to {save_path}. Farewell.")
+        except Exception as e:
+            ui.error(f"Save failed: {e}. Quitting anyway.")
         sys.exit(0)
     else:
         return False
@@ -127,24 +171,51 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=f"{CAMPAIGN_TITLE} -- a CLI D&D game with an LLM DM.")
     parser.add_argument("--new", action="store_true", help="Start a new campaign (overwrites save).")
     parser.add_argument("--save", default="save.json", help="Path to save file (default: save.json).")
-    parser.add_argument("--region", default=None, help="AWS region (default: env or us-west-2).")
-    parser.add_argument("--model", default=None, help="Bedrock model id (default: env or Claude Opus 4.5 inference profile).")
+    parser.add_argument("--region", default=None, help="AWS region (default: env or us-east-1).")
+    parser.add_argument("--model", default=None, help="Bedrock model id (default: env or Claude Opus 4.5 US inference profile).")
+    parser.add_argument("--profile", default=None, help="AWS profile name (default: env AWS_PROFILE, e.g. 'lytix').")
     args = parser.parse_args()
 
     save_path = Path(args.save)
 
-    ui.banner(CAMPAIGN_TITLE, "A solo D&D-style campaign with an AI Dungeon Master")
+    ui.title_screen(art.TITLE_ART, art.CAMPAIGN_BANNER)
 
     # Load or create
     state: GameState
     is_new = False
     if save_path.exists() and not args.new:
-        choice = ui.prompt(f"Save file found at {save_path}. [c]ontinue or [n]ew? ").strip().lower()
+        # Try to peek at the save so the prompt can describe what's in it.
+        # If the peek fails, fall through to the normal load-and-fail path.
+        peek: GameState | None = None
+        try:
+            peek = GameState.load(save_path)
+        except Exception as e:
+            ui.warn(f"Save file at {save_path} could not be read ({e}).")
+
+        if peek is not None:
+            p = peek.player
+            ui.section("Existing save found")
+            print(f"  file:      {save_path}")
+            print(f"  character: {p.name} -- level {p.level} {p.race} {p.char_class}")
+            print(f"  hp:        {p.hp}/{p.max_hp}    gold: {p.gold}    xp: {p.xp}")
+            print(f"  location:  {peek.player_location}")
+            print(f"  turn:      {peek.turn}")
+            if peek.quests:
+                active = [n for n, q in peek.quests.items() if q.get("status", "active") == "active"]
+                if active:
+                    print(f"  quests:    {', '.join(active)}")
+            choice = ui.prompt("[c]ontinue this campaign or start [n]ew? (continue) ").strip().lower()
+        else:
+            choice = ui.prompt(f"Save file found at {save_path}. [c]ontinue or [n]ew? ").strip().lower()
+
         if choice in ("n", "new"):
+            if ui.prompt(f"Starting new will overwrite {save_path}. Are you sure? [y/N] ").strip().lower() != "y":
+                ui.system("Aborted.")
+                sys.exit(0)
             is_new = True
         else:
             try:
-                state = GameState.load(save_path)
+                state = peek if peek is not None else GameState.load(save_path)
                 ui.success(f"Loaded {state.player.name}, level {state.player.level} {state.player.race} {state.player.char_class} -- turn {state.turn}, in {state.player_location}.")
             except Exception as e:
                 ui.error(f"Failed to load save: {e}")
@@ -164,13 +235,14 @@ def main() -> None:
 
     # Init DM
     try:
-        dm = DungeonMaster(model_id=args.model, region=args.region)
+        dm = DungeonMaster(model_id=args.model, region=args.region, profile=args.profile)
     except Exception as e:
         ui.error(f"Failed to initialize Bedrock client: {e}")
         ui.system("Make sure your AWS credentials are configured and the model id is correct.")
         sys.exit(1)
 
-    ui.system(f"DM model: {dm.model_id}  region: {dm.region}")
+    profile_str = f"  profile: {dm.profile}" if dm.profile else ""
+    ui.system(f"DM model: {dm.model_id}  region: {dm.region}{profile_str}")
 
     # Opening scene only on a fresh campaign
     if is_new:
@@ -180,6 +252,14 @@ def main() -> None:
             ui.error(f"DM error: {e}")
             traceback.print_exc()
         state.save(save_path)
+    else:
+        # On resume, replay the last DM narration so the player has context.
+        last = _last_dm_narration(state)
+        if last:
+            ui.section("Where you left off")
+            ui.dm(last)
+        else:
+            ui.system("(no prior narration found; just describe what you do)")
 
     # Main loop
     while True:

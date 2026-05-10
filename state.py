@@ -23,6 +23,63 @@ DEFAULT_SAVE_PATH = Path("save.json")
 MAX_HISTORY_MESSAGES = 60
 
 
+def _is_clean_user_text(msg: dict) -> bool:
+    """A user message that contains text and no toolResult -- a safe trim/start point."""
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content") or []
+    has_text = any("text" in b for b in content)
+    has_tool_result = any("toolResult" in b for b in content)
+    return has_text and not has_tool_result
+
+
+def _is_clean_assistant_close(msg: dict) -> bool:
+    if msg.get("role") != "assistant":
+        return False
+    content = msg.get("content") or []
+    has_text = any("text" in b and b["text"].strip() for b in content)
+    has_tool_use = any("toolUse" in b for b in content)
+    return has_text and not has_tool_use
+
+
+def sanitize_messages(messages: list[dict]) -> list[dict]:
+    """Make a message history safe to send to Bedrock Converse.
+
+    Strategy: trim from both ends until invariants hold.
+      - Tail must be an assistant message with non-empty text and no toolUse.
+      - Head must be a user message with text and no toolResult.
+    Middle alternation is guaranteed by take_turn (which is the only way new
+    messages get appended). Sanitize is defense-in-depth for crashes.
+    """
+    out = list(messages)
+    # Strip tail until clean assistant text close.
+    while out and not _is_clean_assistant_close(out[-1]):
+        out.pop()
+    # Strip head until clean user-text start.
+    while out:
+        first = out[0]
+        if (
+            first.get("role") == "user"
+            and any("text" in b for b in first.get("content", []))
+            and not any("toolResult" in b for b in first.get("content", []))
+        ):
+            break
+        out.pop(0)
+    return out
+
+
+def safe_trim(messages: list[dict], max_keep: int) -> list[dict]:
+    """Trim from the start to at most max_keep messages, but only at a clean
+    boundary (a user message with text content, not toolResult). Never split
+    a tool_use/toolResult pair."""
+    if len(messages) <= max_keep:
+        return messages
+    start = len(messages) - max_keep
+    while start < len(messages) and not _is_clean_user_text(messages[start]):
+        start += 1
+    return messages[start:]
+
+
 @dataclass
 class GameState:
     player: Character
@@ -57,10 +114,11 @@ class GameState:
             "npcs": self.npcs,
             "quests": self.quests,
             "journal": self.journal,
-            "messages": self.messages[-MAX_HISTORY_MESSAGES:],
+            "messages": safe_trim(self.messages, MAX_HISTORY_MESSAGES),
             "turn": self.turn,
             "in_combat": self.in_combat,
             "combat_summary": self.combat_summary,
+            "schema_version": 1,
         }
 
     @classmethod
@@ -72,18 +130,26 @@ class GameState:
             npcs=d.get("npcs", copy.deepcopy(SEED_NPCS)),
             quests=d.get("quests", {}),
             journal=d.get("journal", []),
-            messages=d.get("messages", []),
+            # Sanitize on load so an interrupted save can never wedge resume.
+            messages=sanitize_messages(d.get("messages", [])),
             turn=d.get("turn", 0),
             in_combat=d.get("in_combat", False),
             combat_summary=d.get("combat_summary", ""),
         )
 
     def save(self, path: Path = DEFAULT_SAVE_PATH) -> None:
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        # Atomic write: write to a temp file then rename, so an interrupted
+        # save cannot leave a half-written/corrupted save file.
+        path = Path(path)
+        if path.parent and str(path.parent) not in ("", "."):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.to_dict(), indent=2))
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path = DEFAULT_SAVE_PATH) -> "GameState":
-        return cls.from_dict(json.loads(path.read_text()))
+        return cls.from_dict(json.loads(Path(path).read_text()))
 
 
 # --- Snapshot rendering for the system prompt ----------------------------

@@ -34,15 +34,26 @@ Configure AWS credentials so boto3 can find them (env vars, `~/.aws/credentials`
 or instance role). Make sure your account has access to Claude Opus 4.5 on
 Bedrock.
 
-The default model id is `us.anthropic.claude-opus-4-5-20250929-v1:0` (the US
-cross-region inference profile). If your account uses a different id, override:
+Defaults target Claude Opus 4.5 via the US cross-region inference profile in
+`us-east-1`:
+
+- model id: `us.anthropic.claude-opus-4-5-20251101-v1:0`
+- region: `us-east-1`
+
+> Note: the bare `anthropic.claude-opus-4-5-20251101-v1:0` id rejects on-demand
+> calls -- you must use the `us.` (or other regional) inference-profile prefix.
+
+Override via env or CLI flags:
 
 ```bash
-export BEDROCK_MODEL_ID="us.anthropic.claude-opus-4-5-YOUR-DATE-v1:0"
-export AWS_REGION="us-west-2"
+export AWS_PROFILE=lytix          # or pass --profile lytix
+export BEDROCK_MODEL_ID="us.anthropic.claude-opus-4-5-20251101-v1:0"
+export AWS_REGION="us-east-1"
 ```
 
-You can also pass `--model` and `--region` as CLI flags.
+```bash
+python game.py --profile lytix --region us-east-1
+```
 
 ## Play
 
@@ -62,6 +73,7 @@ In-game slash commands:
 | `/journal` | DM's running journal of events |
 | `/quests` | quest log |
 | `/map` | discovered (and rumored) locations |
+| `/recap` | reprint the most recent DM narration |
 | `/save` | save now (also auto-saves every turn) |
 | `/quit` | save and exit |
 
@@ -79,7 +91,26 @@ needed.
 - `character.py` -- character data, creation flow, leveling
 - `world.py` -- campaign bible, seed locations, seed NPCs
 - `dice.py` -- dice notation parser
-- `ui.py` -- terminal rendering helpers
+- `ui.py` -- terminal rendering helpers (boxes, colors, HP bar, art frame)
+- `art.py` -- static ASCII art (title screen, class sigils)
+- `verify.py` -- mocked end-to-end test (no Bedrock cost)
+
+## Resuming on another machine
+
+`save.json` lives at the repo root and is checked into git on purpose.
+To move a campaign between machines:
+
+```bash
+# on machine A, after playing:
+git add save.json && git commit -m "campaign progress" && git push
+
+# on machine B:
+git pull
+python game.py    # picks up save.json and prompts to continue
+```
+
+The save is a single JSON file (atomic write via `save.json.tmp` → rename),
+so commits are clean diffs of game state.
 
 ## Design notes
 
@@ -97,6 +128,18 @@ needed.
 - Dice rolls are visible. The DM calls `roll_dice` with the player's
   modifier and a DC; the result is printed to the terminal so you see
   the math.
+
+## Verifying without spending Bedrock credits
+
+`verify.py` runs the full pipeline (character creation, every tool, save/load,
+the DM agent loop, save-then-resume, and Bedrock-error rollback) against a
+mocked Bedrock client. No model calls, no cost.
+
+```bash
+python verify.py
+```
+
+Should print `46 passed, 0 failed`.
 
 ## Caveats
 
